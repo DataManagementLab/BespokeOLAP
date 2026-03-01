@@ -1,0 +1,9 @@
+${constraints}
+
+Optimize the implementation of ${query_id} using this sample execution plan collected from DuckDB (sf ${sf}):
+${duckdb_plan}
+
+Study the plan to understand join order, cardinalities, operator choices, and data access patterns that the DuckDB optimizer arrived at. Use this structural insight to align the current implementation with the plan's informations (e.g. build/probe sides, filter selectivity, aggregation grouping).
+
+After making your changes, validate that the query produces correct results and measure performance compared to the previous version.
+Make sure the performance improved. Otherwise, try again or remove your changes.

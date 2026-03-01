@@ -1,0 +1,51 @@
+"""Shared human-readable labels for canonical strategy keys."""
+
+from typing import Tuple
+
+STRATEGY_DISPLAY_NAMES: dict[str, Tuple[str, str]] = {
+    # C=Classical, E=Exotical
+    # Storage strategies
+    "dictionary_encoding": ("Dictionary Encoding", "C"),
+    "compact_int16_date": ("Compact Date (16-bit offset)", "E"),
+    "scaled_integer": ("Scaled Integer / Fixed-Point", "E"),
+    "string_arena": ("Flat String Arena (offset array)", "C"),
+    "temporal_sharding_zonemap": ("Temporal Sharding + Zone Maps", "E"),
+    "join_range_directory": ("Sorted Range Directory (join key)", "C"),
+    "join_hash_index": ("Hash Index (O(1) join lookup)", "E"),
+    "precomputed_predicate": ("Precomputed Boolean Predicate Flag", "E"),
+    "sorted_physical_layout": ("Physical Row Sort Order", "C"),
+    "SoA_columnar_layout": ("Columnar Layout (Struct-of-Arrays)", "C"),
+    "micro_AoS_pack": ("Cache-Packed Hot-Column Struct", "E"),
+    "precomputed_lookup_table": ("Precomputed Arithmetic Lookup Table", "E"),
+    "shipmode_indexed_shard": ("Shard × Shipmode Sub-Index", "E"),
+    "per_order_aggregated_flag": ("Order-Level Aggregated Summary Flags", "E"),
+    "precomputed_derived_column": ("Precomputed Derived Column", "E"),
+    # Execution strategies
+    "bitmap_semi_join": ("Bitmap Semi-Join", "E"),
+    "index_nested_loop_join": ("Index Nested-Loop Join", "C"),
+    "tag_array_join": ("Tag-Array Join", "E"),
+    "hash_join": ("Hash Join", "C"),
+    "sort_merge_join": ("Sort-Merge Join", "C"),
+    "streaming_group_join": ("Streaming Group Join", "E"),
+    "full_table_scan": ("Full Table Scan", "C"),
+    "shard_skip_scan": ("Shard-Skip Scan (Zone Maps)", "C"),
+    "sorted_range_scan": ("Sorted Range Scan", "C"),
+    "sorted_key_range_lookup": ("Sorted Key Range Lookup", "C"),
+    "dictionary_predicate_rewrite": ("Dictionary Predicate Rewrite", "E"),
+    "precomputed_flag_scan": ("Precomputed Flag Scan", "E"),
+    "secondary_index_scan": ("Secondary Index Scan", "E"),
+    "direct_array_aggregation": ("Direct Array Aggregation", "E"),
+    "dense_key_aggregation": ("Dense-Key Aggregation", "E"),
+    "hash_aggregation": ("Hash Aggregation", "C"),
+    "scalar_aggregation": ("Scalar Aggregation", "C"),
+    "inline_aggregation": ("Inline (Fused) Aggregation", "E"),
+    "two_phase_aggregation": ("Two-Phase Aggregation", "C"),
+    "software_prefetching": ("Software Prefetching", "E"),
+    "loop_unrolling": ("Manual Loop Unrolling", "E"),
+    "branch_hint_optimization": ("Branch-Hint (__builtin_expect)", "E"),
+    "pointer_restrict_scan": ("Pointer __restrict Aliasing", "E"),
+    "compiler_target_directives": ("Compiler Target Directives (AVX2)", "E"),
+    "lookup_table_arithmetic": ("Lookup-Table Arithmetic", "E"),
+    "integer_scaled_arithmetic": ("Integer Scaled Arithmetic", "E"),
+    "branchless_range_check": ("Branchless Range Check", "E"),
+}

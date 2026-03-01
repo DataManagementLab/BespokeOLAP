@@ -1,0 +1,72 @@
+# Objective
+Add comprehensive tracing instrumentation to measure query execution timing and row flow. The goal is to produce actionable data that identifies bottlenecks and validates optimizations.
+
+# Requirements
+## 1. Compilation & Overhead
+- All profiling code must be behind #ifdef TRACE
+- Zero overhead when compiled without the flag
+- No allocations or I/O in hot paths—print results once at query end
+- Use high-resolution timers (nanosecond precision)
+
+## 2. Output Format
+Stable, machine-parsable output with two line types:
+```
+PROFILE <section_name> <nanoseconds>
+COUNT <counter_name> <value>
+```
+Names should reflect the specific query, and phase. E.g. `q1_titlescan_decode`, ...
+
+## 3. Row Count Instrumentation
+Track data flow through each operator:
+
+Scan counters:
+- rows_scanned - Total rows read
+- rows_emitted - Rows passing filter (rows_scanned - rows_filtered_out)
+
+Join counters:
+- build_rows_in - Build side input rows
+- probe_rows_in - Probe side input rows
+- join_rows_emitted - Output rows
+
+Aggregation counters:
+- agg_rows_in - Input rows
+- groups_created - Distinct groups
+- agg_rows_emitted - Output rows (usually equals groups_created)
+
+Sort counters:
+- sort_rows_in
+- sort_rows_out
+
+General:
+- query_output_rows - Final result count
+
+## 4. Implementation Pattern
+Use RAII-style scoped timers:
+```
+#ifdef TRACE
+#define PROFILE_SCOPE(name) ScopedTimer _timer(name)
+class ScopedTimer {
+    const char* name;
+    uint64_t start_ns;
+public:
+    ScopedTimer(const char* n) : name(n), start_ns(get_time_ns()) {}
+    ~ScopedTimer() { record_timing(name, get_time_ns() - start_ns); }
+};
+#else
+#define PROFILE_SCOPE(name)
+#endif
+```
+Usage:
+```
+void execute_scan() {
+    PROFILE_SCOPE("scan_total");
+    {
+        PROFILE_SCOPE("scan_decode");
+        decode_data();
+    }
+    rows_scanned += n;
+}
+```
+
+# YOUR TASK
+Instrument the execution code of all queries to collect the tracing statistics. Use macros to add timing and counting instrumentation to all major operatorion (scan, join, aggregation, sort, etc.) and wherever you seem helpful according to the requirements above. Ensure that the output is stable and parsable, and that there is no overhead when TRACE is disabled.

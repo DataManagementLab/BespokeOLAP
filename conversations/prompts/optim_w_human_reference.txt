@@ -1,0 +1,10 @@
+${constraints}
+
+Optimize query ${query_id} based on the collected tracing statistics in `tracing_output.log`.
+
+Reduce the query runtime to less than ${target_rt} for sf ${sf} (current runtime: ${current_rt}). Approach this as Prof. Thomas Neumann or Matthias Jasny would: apply every low-level technique available, leave nothing on the table. Focus on the bottlenecks identified in the tracing output, but also reconsider the overall approach if the remaining gap is large.
+
+Be carefull with changes that affect other queries${bespoke_storage_related}. Avoid regressions on the other queries.
+
+After making your changes, validate that the query produces correct results and improved performance compared to the previous version. Benchmark on scalefactor ${sf}.
+Make sure the performance improved. Otherwise, try again or remove your changes.

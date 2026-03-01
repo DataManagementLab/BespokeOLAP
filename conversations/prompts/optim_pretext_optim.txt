@@ -1,0 +1,5 @@
+Your task is to optimize the existing codebase to achieve the best possible performance for the given queries.
+
+During build, the database engine reads data from Arrow-Tables into a main-memory storage layout (in-memory database system).
+
+You can modify any part of the existing codebase to improve performance, including data structures, ${storage_layout}algorithms, compression, and execution strategies. Focus on optimizing query execution times while maintaining correctness of the results. You can also change the ingestion pipeline if needed.

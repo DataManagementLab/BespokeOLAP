@@ -1,0 +1,15 @@
+${constraints}
+
+Optimize query ${query_id} using expert knowledge on high-performance in-memory OLAP systems.
+
+An expert has given the following tips to consider when optimizing a custom in-memory OLAP database engine in C++. The workload is read-only and the set of queries is fixed:
+
+${expert_knowledge}
+
+Apply this tipps to bring down query runtime to ${target_rt} for sf ${sf} (current rt: ${current_rt}).
+
+After making your changes, validate correctness and benchmark on scalefactor ${sf}. Make sure the performance improved. Otherwise, try again or remove your changes.
+
+Be carefull with changes that affect other queries${bespoke_storage_related}. Avoid regressions on the other queries.
+
+Turn off trace instrumentation in the run-tool for reliable benchmarking. Call run-tool with trace to gather updated statistics for bottleneck identification (will be written to `tracing_output.log`).
