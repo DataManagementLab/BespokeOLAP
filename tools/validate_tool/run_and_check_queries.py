@@ -203,12 +203,13 @@ def check_output_correctness(
             sort_cols = [col for col, _ in inst.order_by_info]
 
             # perform col rewrites
-            sort_cols = []
+            rewritten = []
             for c in sort_cols:
                 if c.lower() == "count(*)":
-                    sort_cols.append("count_star()")
+                    rewritten.append("count_star()")
                 else:
-                    sort_cols.append(c)
+                    rewritten.append(c)
+            sort_cols = rewritten
 
             # ensure all sort cols are present
             for c in sort_cols:
