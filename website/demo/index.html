@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BespokeOLAP Interactive Demo</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark-dimmed.min.css">
+<link rel="stylesheet" href="demo.css">
+</head>
+<body>
+
+<!-- Control Bar -->
+<nav class="control-bar">
+  <div class="control-inner">
+    <a href="../" class="back-link">&larr;</a>
+    <a href="../" class="logo">BespokeOLAP</a>
+    <select id="sel-query" title="Query" class="query-select-native"></select>
+    <span id="query-name" class="query-name-label"></span>
+    <div class="settings-shell">
+      <button
+        type="button"
+        id="settings-button"
+        class="settings-button"
+        aria-haspopup="dialog"
+        aria-expanded="false"
+        aria-controls="settings-popover"
+        title="Settings"
+      >
+        <span class="settings-button-icon">&#9881;</span>
+        <span class="settings-button-label">Settings</span>
+      </button>
+      <div id="settings-popover" class="settings-popover" hidden>
+        <div class="settings-popover-header">
+          <span>Settings</span>
+        </div>
+        <label class="settings-field">
+          <span class="settings-field-label">Benchmark</span>
+          <select id="sel-benchmark" title="Benchmark">
+            <option value="tpch-sf20">TPC-H</option>
+          </select>
+        </label>
+        <label class="settings-field">
+          <span class="settings-field-label">W&amp;B Run ID</span>
+          <input id="wandb-run-id" class="settings-input" type="text" readonly value="" aria-label="W&B Run ID">
+        </label>
+        <label class="settings-field">
+          <span class="settings-field-label">Theme</span>
+          <select id="sel-theme" title="Theme">
+            <option value="light">Light</option>
+            <option value="dark">Dark</option>
+          </select>
+        </label>
+      </div>
+    </div>
+    <div class="mode-badge">
+      <span class="mode-dot" id="mode-dot"></span>
+      <span id="mode-label">Static</span>
+    </div>
+  </div>
+  <div class="query-rail-wrap">
+    <div class="query-rail-label">Browse Queries</div>
+    <div class="query-rail" id="query-rail"></div>
+  </div>
+</nav>
+
+<!-- Main Content -->
+<div class="demo-container">
+
+  <!-- Pipeline Navigation -->
+  <div class="pipeline-nav" id="pipeline-nav"></div>
+
+  <!-- Stage Content (swapped per stage) -->
+  <div class="stage-content" id="stage-content"></div>
+
+  <!-- Always visible: Performance + Heatmap -->
+  <div class="bottom-section">
+    <!-- Performance -->
+    <div class="card reveal">
+      <div class="card-header">
+        <span>Performance</span>
+        <div style="display:flex;gap:0.6rem;align-items:center">
+          <span id="sf-label" class="sf-label">SF</span>
+        </div>
+      </div>
+      <div class="card-body">
+        <div class="perf-layout">
+          <div class="perf-chart" id="perf-chart"></div>
+          <div id="speedup-container"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Optimization Timeline -->
+    <div class="card reveal delay-1">
+      <div class="card-header">
+        <span>Optimization Journey</span>
+        <span id="iter-count" class="sf-label"></span>
+      </div>
+      <div class="card-body">
+        <div class="timeline" id="timeline"></div>
+      </div>
+    </div>
+
+    <!-- Heatmap -->
+    <div class="card reveal delay-2 heatmap-card">
+      <div class="card-header">
+        <span>All Queries &mdash; Speedup vs DuckDB</span>
+      </div>
+      <div class="card-body">
+        <div class="heatmap" id="heatmap"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Footer -->
+  <footer class="demo-footer">
+    <a href="https://arxiv.org/abs/2603.02001">Paper</a> &middot;
+    <a href="https://github.com/teckmann/bespoke-olap">GitHub</a> &middot;
+    BespokeOLAP &mdash; LLM-Synthesized Workload-Specific Database Engines
+  </footer>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/cpp.min.js"></script>
+<script src="demo.js"></script>
+</body>
+</html>

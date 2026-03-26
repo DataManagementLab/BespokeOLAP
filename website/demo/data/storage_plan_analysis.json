@@ -1,0 +1,3095 @@
+{
+  "analysis": {
+    "summary": "This plan is a workload-tuned hybrid of classic columnar compression, date-driven shard pruning, and explicit join-navigation metadata tailored to TPC-H\u2019s scan-heavy and join-heavy mix. Its standout theme is keeping base data non-redundant while adding compact relationship maps, bitmap fanout structures, and one unusually creative arithmetic encoding for revenue-style measures.",
+    "tables": [
+      {
+        "table_name": "LINEITEM",
+        "row_layout": "hybrid_soa_aos",
+        "column_encodings": [
+          {
+            "column_name": "l_returnflag",
+            "encoding": "dictionary",
+            "encoding_detail": "Global string dictionary with per-segment bitpacked dictionary codes for the small enum domain.",
+            "bits_per_value": 2,
+            "compression_ratio_estimate": "high, roughly 8-20x vs raw strings"
+          },
+          {
+            "column_name": "l_linestatus",
+            "encoding": "dictionary",
+            "encoding_detail": "Global dictionary plus per-segment bitpacked indices for tiny categorical values.",
+            "bits_per_value": 2,
+            "compression_ratio_estimate": "high, roughly 8-20x vs raw strings"
+          },
+          {
+            "column_name": "l_shipinstruct",
+            "encoding": "dictionary",
+            "encoding_detail": "Small-enum string values dictionary-coded globally, then bitpacked per segment.",
+            "bits_per_value": 3,
+            "compression_ratio_estimate": "high, roughly 6-15x vs raw strings"
+          },
+          {
+            "column_name": "l_shipmode",
+            "encoding": "dictionary",
+            "encoding_detail": "Global dictionary for shipping modes with compact segment-local bitpacked codes.",
+            "bits_per_value": 3,
+            "compression_ratio_estimate": "high, roughly 6-15x vs raw strings"
+          },
+          {
+            "column_name": "l_shipdate",
+            "encoding": "day_offset",
+            "encoding_detail": "Stored as 16-bit day offsets from 1992-01-01 inside year/month shards for strong date pruning.",
+            "bits_per_value": 16,
+            "compression_ratio_estimate": "about 2-4x vs 64-bit date/timestamp"
+          },
+          {
+            "column_name": "l_commitdate",
+            "encoding": "day_offset",
+            "encoding_detail": "Date represented as 16-bit day offset from the shared epoch.",
+            "bits_per_value": 16,
+            "compression_ratio_estimate": "about 2-4x vs 64-bit date/timestamp"
+          },
+          {
+            "column_name": "l_receiptdate",
+            "encoding": "day_offset",
+            "encoding_detail": "Compact 16-bit day-offset storage aligned with shard metadata.",
+            "bits_per_value": 16,
+            "compression_ratio_estimate": "about 2-4x vs 64-bit date/timestamp"
+          },
+          {
+            "column_name": "l_orderkey",
+            "encoding": "delta",
+            "encoding_detail": "Monotonic orderkey array stored as delta+varint, aligned with l_linenumber so lines of one order are contiguous.",
+            "bits_per_value": null,
+            "compression_ratio_estimate": "about 2-6x vs raw 32-bit ints depending on locality"
+          },
+          {
+            "column_name": "l_linenumber",
+            "encoding": "raw",
+            "encoding_detail": "Implicit alignment companion to l_orderkey contiguity; likely cheap narrow integer storage.",
+            "bits_per_value": null,
+            "compression_ratio_estimate": "low to moderate"
+          },
+          {
+            "column_name": "l_extendedprice",
+            "encoding": "scaled_int",
+            "encoding_detail": "Stored in a 4-field micro-AoS with discount, tax, and quantity as scaled int32 for SIMD revenue calculations.",
+            "bits_per_value": 32,
+            "compression_ratio_estimate": "about 2x vs decimal objects / modest vs int32 baseline"
+          },
+          {
+            "column_name": "l_discount",
+            "encoding": "custom",
+            "encoding_detail": "Part of the micro-AoS revenue cluster; exact values reconstructed through the discount tax lattice using polynomial approximation plus 4-bit residual bucket lookup.",
+            "bits_per_value": 4,
+            "compression_ratio_estimate": "potentially 2-4x over naive exact decimal storage for this field"
+          },
+          {
+            "column_name": "l_tax",
+            "encoding": "custom",
+            "encoding_detail": "Stored with the revenue micro-cluster and reconstructed losslessly using the discount tax lattice residual mechanism.",
+            "bits_per_value": 4,
+            "compression_ratio_estimate": "potentially 2-4x over naive exact decimal storage for this field"
+          },
+          {
+            "column_name": "l_quantity",
+            "encoding": "scaled_int",
+            "encoding_detail": "Scaled int32 in the micro-AoS revenue cluster to reduce cache misses in common aggregates.",
+            "bits_per_value": 32,
+            "compression_ratio_estimate": "about 2x vs heavyweight decimal representation"
+          },
+          {
+            "column_name": "l_comment",
+            "encoding": "front_coding",
+            "encoding_detail": "Kept in a separate string arena with per-row 32-bit offsets; front-coded within each shard for compression of similar nearby comments.",
+            "bits_per_value": null,
+            "compression_ratio_estimate": "about 2-5x vs raw strings"
+          }
+        ],
+        "sort_order": {
+          "columns": [
+            "l_shipdate",
+            "l_orderkey",
+            "l_linenumber"
+          ],
+          "purpose": "Physical organization is date-sharded for pruning, while the monotonic orderkey alignment keeps all lines of an order contiguous for fast order-driven joins and Q18/Q21 lookups."
+        },
+        "indexes": [
+          {
+            "name": "order directory",
+            "type": "sparse directory / range index",
+            "columns": [
+              "l_orderkey"
+            ],
+            "purpose": "Maps each orderkey to a [start,end] lineitem range so order-centric queries can jump directly to an order\u2019s lines.",
+            "queries_helped": [
+              "Q18",
+              "Q21"
+            ]
+          },
+          {
+            "name": "shipdate shard min/max metadata",
+            "type": "sparse directory",
+            "columns": [
+              "l_shipdate",
+              "l_discount"
+            ],
+            "purpose": "Prunes year/month shards and segments for date and discount predicates.",
+            "queries_helped": [
+              "Q1",
+              "Q6",
+              "Q12",
+              "Q14",
+              "Q15",
+              "Q20"
+            ]
+          }
+        ],
+        "partitioning": "Two-tier partitioning by l_shipdate: year -> month, with per-month min/max metadata for date and discount pruning.",
+        "notable_features": [
+          "Wide columnar segments using SIMD-friendly 1024-row vectors.",
+          "Global dictionaries plus per-segment bitpacking for low-cardinality enums.",
+          "Order-contiguous physical layout via monotonic orderkey alignment.",
+          "Micro-AoS cluster for the four most frequently co-accessed revenue columns.",
+          "Lossless discount tax lattice for exact arithmetic with compact residuals.",
+          "Comments isolated in a separate compressed arena to keep hot scans narrow.",
+          "Explicit commitment to non-redundant metadata only."
+        ]
+      },
+      {
+        "table_name": "ORDERS",
+        "row_layout": "columnar",
+        "column_encodings": [
+          {
+            "column_name": "o_orderdate",
+            "encoding": "day_offset",
+            "encoding_detail": "16-bit day offsets from epoch for compact date filtering and sorting.",
+            "bits_per_value": 16,
+            "compression_ratio_estimate": "about 2-4x vs 64-bit date/timestamp"
+          },
+          {
+            "column_name": "o_orderkey",
+            "encoding": "delta",
+            "encoding_detail": "Delta-encoded per block because sort order by date then orderkey preserves local monotonicity.",
+            "bits_per_value": null,
+            "compression_ratio_estimate": "about 2-5x vs raw ints"
+          },
+          {
+            "column_name": "o_custkey",
+            "encoding": "rle",
+            "encoding_detail": "Run-length encoded customer map per customer to support quick traversal of orders by customer.",
+            "bits_per_value": null,
+            "compression_ratio_estimate": "workload-dependent; moderate when clustered access is exploited"
+          },
+          {
+            "column_name": "o_orderstatus",
+            "encoding": "dictionary",
+            "encoding_detail": "Low-cardinality status values dictionary-coded.",
+            "bits_per_value": 2,
+            "compression_ratio_estimate": "high, roughly 6-20x vs raw strings"
+          },
+          {
+            "column_name": "o_orderpriority",
+            "encoding": "dictionary",
+            "encoding_detail": "Priority strings stored as dictionary codes.",
+            "bits_per_value": 3,
+            "compression_ratio_estimate": "high, roughly 6-15x vs raw strings"
+          },
+          {
+            "column_name": "o_shippriority",
+            "encoding": "raw",
+            "encoding_detail": "Stored as tinyint due to tiny domain and no need for heavier compression.",
+            "bits_per_value": 8,
+            "compression_ratio_estimate": "about 1-2x vs int32"
+          },
+          {
+            "column_name": "o_comment",
+            "encoding": "dictionary",
+            "encoding_detail": "Separate string arena encoded as a dictionary of frequent substrings plus per-row 16-bit token stream for comment filters like Q13.",
+            "bits_per_value": 16,
+            "compression_ratio_estimate": "about 2-6x vs raw text depending on substring reuse"
+          }
+        ],
+        "sort_order": {
+          "columns": [
+            "o_orderdate",
+            "o_orderkey"
+          ],
+          "purpose": "Optimizes date-range filtering while preserving local orderkey monotonicity for compression and lineitem joins."
+        },
+        "indexes": [
+          {
+            "name": "orderkey hash index",
+            "type": "hash",
+            "columns": [
+              "o_orderkey"
+            ],
+            "purpose": "Direct lookup from orderkey to rowid for fast joins from lineitem or sparse order probes.",
+            "queries_helped": [
+              "Q3",
+              "Q5",
+              "Q10",
+              "Q13",
+              "Q18"
+            ]
+          },
+          {
+            "name": "customer order map",
+            "type": "rle map / posting list",
+            "columns": [
+              "o_custkey"
+            ],
+            "purpose": "Accelerates traversing orders belonging to a customer without scanning the whole table.",
+            "queries_helped": [
+              "Q3",
+              "Q5",
+              "Q10",
+              "Q13",
+              "Q18"
+            ]
+          },
+          {
+            "name": "temporal fanout map",
+            "type": "roaring bitmap",
+            "columns": [
+              "o_orderdate",
+              "o_orderkey"
+            ],
+            "purpose": "Per-month bitmap of orderkeys to support fast semi-joins and month-scoped order filtering.",
+            "queries_helped": [
+              "Q4",
+              "Q12"
+            ]
+          }
+        ],
+        "partitioning": null,
+        "notable_features": [
+          "Date-first sort order tailored to many TPC-H time predicates.",
+          "Direct hash lookup on orderkey for join-heavy plans.",
+          "Per-customer order traversal structure rather than relying only on scans.",
+          "Month-keyed Roaring bitmaps for semi-join fanout.",
+          "Comment token stream designed around frequent-substring filtering in Q13."
+        ]
+      },
+      {
+        "table_name": "CUSTOMER",
+        "row_layout": "columnar",
+        "column_encodings": [
+          {
+            "column_name": "c_nationkey",
+            "encoding": "raw",
+            "encoding_detail": "Narrow integer key benefitting from clustering by nation.",
+            "bits_per_value": 32,
+            "compression_ratio_estimate": "low unless further compressed by runtime codecs"
+          },
+          {
+            "column_name": "c_custkey",
+            "encoding": "raw",
+            "encoding_detail": "Clustered secondarily within nation for locality in joins.",
+            "bits_per_value": 32,
+            "compression_ratio_estimate": "low"
+          },
+          {
+            "column_name": "c_mktsegment",
+            "encoding": "dictionary",
+            "encoding_detail": "Market segment stored as compact dictionary code.",
+            "bits_per_value": 3,
+            "compression_ratio_estimate": "high, roughly 6-15x vs raw strings"
+          },
+          {
+            "column_name": "c_phone",
+            "encoding": "custom",
+            "encoding_detail": "Stored as 2-byte country code plus 9-byte suffix so country-code predicates avoid full string decoding.",
+            "bits_per_value": 88,
+            "compression_ratio_estimate": "modest vs fixed strings; bigger benefit is selective access"
+          },
+          {
+            "column_name": "c_acctbal",
+            "encoding": "scaled_int",
+            "encoding_detail": "Account balance kept as scaled int32 for compact exact arithmetic.",
+            "bits_per_value": 32,
+            "compression_ratio_estimate": "about 2x vs decimal objects"
+          },
+          {
+            "column_name": "c_name",
+            "encoding": "front_coding",
+            "encoding_detail": "Separate string pool with shared prefix compression.",
+            "bits_per_value": null,
+            "compression_ratio_estimate": "about 2-4x vs raw strings"
+          },
+          {
+            "column_name": "c_address",
+            "encoding": "front_coding",
+            "encoding_detail": "Separate pooled string with shared prefix compression.",
+            "bits_per_value": null,
+            "compression_ratio_estimate": "about 1.5-3x vs raw strings"
+          },
+          {
+            "column_name": "c_comment",
+            "encoding": "front_coding",
+            "encoding_detail": "Comment string pool using shared prefix compression to keep cold text off hot scans.",
+            "bits_per_value": null,
+            "compression_ratio_estimate": "about 1.5-3x vs raw strings"
+          }
+        ],
+        "sort_order": {
+          "columns": [
+            "c_nationkey",
+            "c_custkey"
+          ],
+          "purpose": "Groups customers by nation to make nation/customer joins and grouped traversals more cache-friendly."
+        },
+        "indexes": [
+          {
+            "name": "anti-join bloom",
+            "type": "bloom/xor filter",
+            "columns": [
+              "c_custkey"
+            ],
+            "purpose": "Tests whether a customer appears in ORDERS via o_custkey values without scanning orders, ideal for anti-join style logic.",
+            "queries_helped": [
+              "Q22"
+            ]
+          }
+        ],
+        "partitioning": null,
+        "notable_features": [
+          "Nation-clustered physical layout for locality in nation joins.",
+          "Phone split into country code plus suffix for code-based filtering.",
+          "String-heavy columns isolated in compressed pools.",
+          "Metadata-only anti-join filter sourced from ORDERS values."
+        ]
+      },
+      {
+        "table_name": "SUPPLIER",
+        "row_layout": "columnar",
+        "column_encodings": [
+          {
+            "column_name": "s_nationkey",
+            "encoding": "raw",
+            "encoding_detail": "Narrow join key with locality from nation-based clustering.",
+            "bits_per_value": 32,
+            "compression_ratio_estimate": "low"
+          },
+          {
+            "column_name": "s_suppkey",
+            "encoding": "raw",
+            "encoding_detail": "Secondary key within nation-clustered layout.",
+            "bits_per_value": 32,
+            "compression_ratio_estimate": "low"
+          },
+          {
+            "column_name": "s_acctbal",
+            "encoding": "scaled_int",
+            "encoding_detail": "Exact numeric stored as scaled int32.",
+            "bits_per_value": 32,
+            "compression_ratio_estimate": "about 2x vs decimal objects"
+          },
+          {
+            "column_name": "s_phone",
+            "encoding": "custom",
+            "encoding_detail": "Phone split into country code and suffix to avoid scanning full strings for region/country-style predicates.",
+            "bits_per_value": 88,
+            "compression_ratio_estimate": "modest vs fixed strings"
+          },
+          {
+            "column_name": "s_comment",
+            "encoding": "trigram_index",
+            "encoding_detail": "Comment stored in string arena with trigram index metadata for fast pattern search like Customer%Complaints%.",
+            "bits_per_value": null,
+            "compression_ratio_estimate": "index adds metadata; benefit is selective substring acceleration"
+          }
+        ],
+        "sort_order": {
+          "columns": [
+            "s_nationkey",
+            "s_suppkey"
+          ],
+          "purpose": "Brings suppliers from the same nation together for repeated nation-supplier joins and locality-sensitive plans."
+        },
+        "indexes": [
+          {
+            "name": "supplier comment trigram metadata",
+            "type": "trigram inverted index",
+            "columns": [
+              "s_comment"
+            ],
+            "purpose": "Accelerates LIKE/pattern filters without duplicating the comment text.",
+            "queries_helped": [
+              "Q16"
+            ]
+          }
+        ],
+        "partitioning": null,
+        "notable_features": [
+          "Nation-clustered supplier layout.",
+          "Pattern-search metadata on comments instead of materialized redundant tokens.",
+          "Designed explicitly for Q16 comment predicate acceleration."
+        ]
+      },
+      {
+        "table_name": "PART",
+        "row_layout": "columnar",
+        "column_encodings": [
+          {
+            "column_name": "p_brand",
+            "encoding": "dictionary",
+            "encoding_detail": "Likely dictionary-coded implicitly through clustering and low-cardinality brand domain.",
+            "bits_per_value": null,
+            "compression_ratio_estimate": "moderate to high vs raw strings"
+          },
+          {
+            "column_name": "p_type",
+            "encoding": "dictionary",
+            "encoding_detail": "Type values benefit from dictionary coding and clustering order.",
+            "bits_per_value": null,
+            "compression_ratio_estimate": "moderate to high vs raw strings"
+          },
+          {
+            "column_name": "p_partkey",
+            "encoding": "delta",
+            "encoding_detail": "Delta-encoded due to ordered clustering by brand/type/partkey.",
+            "bits_per_value": null,
+            "compression_ratio_estimate": "about 2-5x vs raw ints"
+          },
+          {
+            "column_name": "p_size",
+            "encoding": "scaled_int",
+            "encoding_detail": "Stored as compact exact integer representation.",
+            "bits_per_value": 32,
+            "compression_ratio_estimate": "low to moderate depending on baseline"
+          },
+          {
+            "column_name": "p_retailprice",
+            "encoding": "scaled_int",
+            "encoding_detail": "Exact decimal retained as scaled int32.",
+            "bits_per_value": 32,
+            "compression_ratio_estimate": "about 2x vs decimal objects"
+          },
+          {
+            "column_name": "p_container",
+            "encoding": "dictionary",
+            "encoding_detail": "Low-cardinality container strings dictionary-coded.",
+            "bits_per_value": null,
+            "compression_ratio_estimate": "high vs raw strings"
+          },
+          {
+            "column_name": "p_mfgr",
+            "encoding": "dictionary",
+            "encoding_detail": "Manufacturer strings stored as dictionary codes.",
+            "bits_per_value": null,
+            "compression_ratio_estimate": "high vs raw strings"
+          },
+          {
+            "column_name": "p_name",
+            "encoding": "suffix_array",
+            "encoding_detail": "String arena with either a per-segment suffix array or minimal perfect hash over 3-gram tokens to accelerate contains-style color predicates while remaining lossless.",
+            "bits_per_value": null,
+            "compression_ratio_estimate": "index-oriented; compression secondary"
+          }
+        ],
+        "sort_order": {
+          "columns": [
+            "p_brand",
+            "p_type",
+            "p_partkey"
+          ],
+          "purpose": "Matches highly selective part predicates in Q16/Q17/Q19 and improves locality for grouped part lookups."
+        },
+        "indexes": [
+          {
+            "name": "part name substring accelerator",
+            "type": "suffix array / minimal perfect 3-gram hash",
+            "columns": [
+              "p_name"
+            ],
+            "purpose": "Speeds LIKE '%color%' style substring search without lossy tokenization.",
+            "queries_helped": [
+              "Q9",
+              "Q20"
+            ]
+          }
+        ],
+        "partitioning": null,
+        "notable_features": [
+          "Cluster order mirrors common TPC-H part filters.",
+          "Lossless substring acceleration on part names.",
+          "Mix of classic dictionary coding and search-oriented string metadata."
+        ]
+      },
+      {
+        "table_name": "PARTSUPP",
+        "row_layout": "columnar",
+        "column_encodings": [
+          {
+            "column_name": "ps_partkey",
+            "encoding": "raw",
+            "encoding_detail": "Leading key in composite order, exploited by offset-range index.",
+            "bits_per_value": 32,
+            "compression_ratio_estimate": "low"
+          },
+          {
+            "column_name": "ps_suppkey",
+            "encoding": "delta",
+            "encoding_detail": "Within each partkey range, supplier keys stored as delta list for compact fanout.",
+            "bits_per_value": null,
+            "compression_ratio_estimate": "about 2-5x vs raw ints"
+          },
+          {
+            "column_name": "ps_availqty",
+            "encoding": "zigzag",
+            "encoding_detail": "Packed in blocks using zigzag/delta-style integer compression.",
+            "bits_per_value": null,
+            "compression_ratio_estimate": "about 2-4x vs raw ints"
+          },
+          {
+            "column_name": "ps_supplycost",
+            "encoding": "zigzag",
+            "encoding_detail": "Block-packed numeric with zigzag/delta compression for compact exact storage.",
+            "bits_per_value": null,
+            "compression_ratio_estimate": "about 2-4x vs raw numeric ints"
+          },
+          {
+            "column_name": "ps_comment",
+            "encoding": "raw",
+            "encoding_detail": "Separate string arena; compression unspecified beyond arena storage.",
+            "bits_per_value": null,
+            "compression_ratio_estimate": "unknown/moderate if generic string compression is applied"
+          }
+        ],
+        "sort_order": {
+          "columns": [
+            "ps_partkey",
+            "ps_suppkey"
+          ],
+          "purpose": "Optimizes part-driven lookups, min-cost supplier searches, and supplier fanout traversal."
+        },
+        "indexes": [
+          {
+            "name": "partsupp two-level composite index",
+            "type": "range index + delta adjacency list",
+            "columns": [
+              "ps_partkey",
+              "ps_suppkey"
+            ],
+            "purpose": "Finds all suppliers for a part via partkey range, then traverses compact supplier lists efficiently.",
+            "queries_helped": [
+              "Q2",
+              "Q9",
+              "Q11",
+              "Q16",
+              "Q20"
+            ]
+          }
+        ],
+        "partitioning": null,
+        "notable_features": [
+          "Composite key physical order specialized for part-to-supplier traversals.",
+          "Two-level index mirrors the table\u2019s natural join graph role.",
+          "Compressed supplier adjacency within each part range."
+        ]
+      },
+      {
+        "table_name": "NATION",
+        "row_layout": "array_of_structs",
+        "column_encodings": [
+          {
+            "column_name": "n_nationkey",
+            "encoding": "raw",
+            "encoding_detail": "Dense int32 key stored in cache-resident AoS form.",
+            "bits_per_value": 32,
+            "compression_ratio_estimate": "low"
+          },
+          {
+            "column_name": "n_name",
+            "encoding": "dictionary",
+            "encoding_detail": "Dictionary-coded tiny-domain nation names.",
+            "bits_per_value": null,
+            "compression_ratio_estimate": "high vs raw strings"
+          },
+          {
+            "column_name": "n_comment",
+            "encoding": "dictionary",
+            "encoding_detail": "Pooled tiny-table string representation.",
+            "bits_per_value": null,
+            "compression_ratio_estimate": "moderate to high"
+          }
+        ],
+        "sort_order": null,
+        "indexes": [
+          {
+            "name": "nation perfect hash",
+            "type": "perfect hash",
+            "columns": [
+              "n_nationkey"
+            ],
+            "purpose": "Constant-time lookup for nation joins with tiny-table overhead minimized.",
+            "queries_helped": [
+              "Q2",
+              "Q5",
+              "Q7",
+              "Q8",
+              "Q9",
+              "Q10",
+              "Q11",
+              "Q20",
+              "Q21",
+              "Q22"
+            ]
+          }
+        ],
+        "partitioning": null,
+        "notable_features": [
+          "AoS layout chosen because the table is tiny and cache-resident.",
+          "Perfect hash removes branchy tiny-table scans.",
+          "Useful as a dimension anchor in many queries."
+        ]
+      },
+      {
+        "table_name": "REGION",
+        "row_layout": "array_of_structs",
+        "column_encodings": [
+          {
+            "column_name": "r_name",
+            "encoding": "dictionary",
+            "encoding_detail": "Dictionary-coded region names in tiny cache-resident table.",
+            "bits_per_value": null,
+            "compression_ratio_estimate": "high vs raw strings"
+          },
+          {
+            "column_name": "r_regionkey",
+            "encoding": "raw",
+            "encoding_detail": "Dense region key for direct mapping.",
+            "bits_per_value": 32,
+            "compression_ratio_estimate": "low"
+          }
+        ],
+        "sort_order": null,
+        "indexes": [
+          {
+            "name": "region name map",
+            "type": "perfect hash / direct map",
+            "columns": [
+              "r_name",
+              "r_regionkey"
+            ],
+            "purpose": "Resolves region-name predicates directly to region keys for region-filtered joins.",
+            "queries_helped": [
+              "Q2",
+              "Q5",
+              "Q8"
+            ]
+          }
+        ],
+        "partitioning": null,
+        "notable_features": [
+          "AoS layout keeps region table trivial and cache-hot.",
+          "Precomputed name-to-key mapping avoids even tiny dictionary scans."
+        ]
+      }
+    ],
+    "novel_techniques": [
+      {
+        "name": "Discount Tax Lattice",
+        "table": "LINEITEM",
+        "category": "encoding",
+        "how_it_works": "Instead of storing full exact decimal values for discount and tax in the hot revenue path, the plan computes a SIMD-friendly polynomial approximation on the fly and keeps only tiny 4-bit residual buckets per row. When an exact answer is required, the engine combines the approximation with a residual lookup table to reconstruct the precise decimal value losslessly.",
+        "why_its_novel": "Most OLAP engines either store scaled integers directly or use generic compression. This design treats common arithmetic columns like a tiny learned codec, but still guarantees exact reconstruction.",
+        "queries_helped": [
+          "Q1",
+          "Q3",
+          "Q5",
+          "Q6",
+          "Q7",
+          "Q8",
+          "Q9",
+          "Q10",
+          "Q14",
+          "Q15",
+          "Q17",
+          "Q19"
+        ],
+        "visual_metaphor": "Like drawing a smooth curve through many nearby points, then attaching a tiny correction sticker to each point so you can recover the exact original.",
+        "data_flow": [
+          "Fit or apply a SIMD-evaluable polynomial for discount/tax values in a block.",
+          "Store only a 4-bit residual bucket per row alongside the hot numeric cluster.",
+          "During scans, evaluate the polynomial for many rows at once.",
+          "If exact output is needed, use the residual bucket to fetch the tiny correction from a lookup table.",
+          "Combine approximation plus correction to recover the original decimal exactly."
+        ],
+        "novelty_score": 9
+      },
+      {
+        "name": "Join Tapestry",
+        "table": "cross-table",
+        "category": "join_acceleration",
+        "how_it_works": "The plan keeps a compact graph of foreign-key relationships as offset arrays spanning orders to lineitem, customer to orders, and part/supplier to partsupp. Rather than repeatedly building large hash tables or copying join keys around, execution can walk these stitched-together ranges directly in vectorized loops.",
+        "why_its_novel": "It turns the schema graph into a physical navigation structure, somewhere between adjacency lists and join indexes, while staying metadata-only. That is more explicit and presentation-friendly than standard per-table indexes alone.",
+        "queries_helped": [
+          "Q2",
+          "Q3",
+          "Q5",
+          "Q9",
+          "Q10",
+          "Q11",
+          "Q13",
+          "Q18",
+          "Q20",
+          "Q21"
+        ],
+        "visual_metaphor": "Like sewing related tables together with short threads, so the engine can pull on one row and immediately find its matching neighborhood in another table.",
+        "data_flow": [
+          "Build compact offset arrays for each major foreign-key relationship.",
+          "Store only row ranges or rowid neighborhoods, not duplicated payload columns.",
+          "At runtime, start from a filtered driving table.",
+          "Follow the stitched offsets to matching rows in the next table.",
+          "Process the joined vectors directly without rebuilding large intermediate maps."
+        ],
+        "novelty_score": 8
+      },
+      {
+        "name": "Temporal Fanout Map",
+        "table": "ORDERS",
+        "category": "indexing",
+        "how_it_works": "For each month, the engine stores a Roaring bitmap of relevant orderkeys. Queries with month-scoped semi-joins can intersect these bitmaps with other filters to identify candidate orders quickly before touching full order rows.",
+        "why_its_novel": "Bitmap indexes are standard, but keying them specifically as month-to-orderkey semi-join fanout structures for TPC-H patterns is a clever workload-shaped twist.",
+        "queries_helped": [
+          "Q4",
+          "Q12"
+        ],
+        "visual_metaphor": "Like a monthly guest list where you can instantly see which order IDs attended that month\u2019s event.",
+        "data_flow": [
+          "Group orders by month from o_orderdate.",
+          "Encode each month\u2019s orderkeys as a Roaring bitmap.",
+          "At query time, choose the relevant months from the predicate.",
+          "Intersect or probe the month bitmap during semi-join filtering.",
+          "Fetch only surviving order rows or matching lineitems."
+        ],
+        "novelty_score": 6
+      },
+      {
+        "name": "Order-Contiguous Lineitem Directory",
+        "table": "LINEITEM",
+        "category": "join_acceleration",
+        "how_it_works": "Lineitems are physically arranged so all rows for one order sit next to each other, and a sparse directory maps orderkey to the contiguous row range. Order-driven queries can jump directly to the needed lines instead of scanning or hashing the full lineitem table.",
+        "why_its_novel": "The pieces are individually familiar, but the deliberate pairing of monotonic orderkey storage, contiguous order grouping, and sparse range lookup is an especially clean fit for TPC-H\u2019s order-to-lineitem fanout queries.",
+        "queries_helped": [
+          "Q18",
+          "Q21"
+        ],
+        "visual_metaphor": "Like keeping every receipt\u2019s line items in one folder and a small card catalog telling you exactly which shelf span holds that folder.",
+        "data_flow": [
+          "Physically cluster lineitems so rows from the same order are adjacent.",
+          "Compress the orderkey sequence with delta+varint.",
+          "Build a sparse directory from each orderkey to its row span.",
+          "When a query selects an order, jump to the span immediately.",
+          "Scan only that narrow slice of lineitems."
+        ],
+        "novelty_score": 6
+      },
+      {
+        "name": "Adaptive Shard Temperature",
+        "table": "cross-table",
+        "category": "caching",
+        "how_it_works": "Each date shard tracks an LRU-style heat score. Frequently touched shards are kept in huge pages in a warmer, more readily scanable state, while cold shards remain more tightly compressed and are decompressed only when needed.",
+        "why_its_novel": "Tiered hot/cold handling exists broadly, but applying it explicitly at date-shard granularity with huge-page residency for a TPC-H-shaped plan makes it a vivid workload-aware storage tactic.",
+        "queries_helped": [
+          "Q1",
+          "Q3",
+          "Q4",
+          "Q5",
+          "Q6",
+          "Q7",
+          "Q8",
+          "Q10",
+          "Q12",
+          "Q14",
+          "Q15",
+          "Q20"
+        ],
+        "visual_metaphor": "Like keeping the most-used binders open on a large desk and the older ones sealed in compact archive boxes until someone asks for them.",
+        "data_flow": [
+          "Track access frequency and recency for each date shard.",
+          "Promote hot shards into huge-page backed memory regions.",
+          "Leave cold shards in denser compressed form.",
+          "On query start, prune to candidate shards via date metadata.",
+          "Scan hot shards directly and lazily decompress any cold shards that survive pruning."
+        ],
+        "novelty_score": 5
+      },
+      {
+        "name": "Anti-Join Bloom",
+        "table": "CUSTOMER",
+        "category": "join_acceleration",
+        "how_it_works": "A compact filter built from ORDERS.o_custkey lets the engine test whether a customer has any matching orders before probing the full orders table. This is especially useful for anti-join logic where most work is deciding absence, not presence.",
+        "why_its_novel": "Bloom filters themselves are standard, but maintaining it as cross-derived metadata specifically to short-circuit Q22-style absence checks is a sharp workload-specific touch.",
+        "queries_helped": [
+          "Q22"
+        ],
+        "visual_metaphor": "Like checking a tiny membership wristband scanner before searching the whole guest ledger.",
+        "data_flow": [
+          "Extract o_custkey values from ORDERS.",
+          "Build a compact bloom or xor filter over seen customer keys.",
+          "During Q22-style evaluation, test each customer key against the filter.",
+          "If the filter says definitely absent, skip the expensive orders probe.",
+          "Only possible matches go on to exact verification."
+        ],
+        "novelty_score": 5
+      },
+      {
+        "name": "Part Name Lossless Substring Accelerator",
+        "table": "PART",
+        "category": "indexing",
+        "how_it_works": "The plan stores part names in a string arena and adds either a per-segment suffix array or a minimal perfect hash over 3-gram tokens. This allows fast contains-style text filters while preserving exact string semantics rather than relying on lossy token approximations.",
+        "why_its_novel": "Suffix arrays are classic text structures, but embedding them selectively at segment level for TPC-H color-name predicates is more specialized than standard warehouse practice.",
+        "queries_helped": [
+          "Q9",
+          "Q20"
+        ],
+        "visual_metaphor": "Like an instant back-of-the-book index that tells you exactly which names contain a word fragment anywhere inside.",
+        "data_flow": [
+          "Store raw part names once in a string arena.",
+          "Build segment-level substring search metadata over those names.",
+          "At query time, convert the search text into suffix or 3-gram probes.",
+          "Identify only candidate rows whose names can contain the pattern.",
+          "Verify exact matches against the original strings losslessly."
+        ],
+        "novelty_score": 5
+      },
+      {
+        "name": "Supplier Comment Complaint Trigram Filter",
+        "table": "SUPPLIER",
+        "category": "indexing",
+        "how_it_works": "Supplier comments remain in a single string arena, but a trigram metadata index allows rapid elimination of rows that cannot match the pattern Customer%Complaints%. Only candidates that pass the trigram check need full string verification.",
+        "why_its_novel": "It is not a brand-new text technique, but using lightweight trigram metadata instead of duplicating tokenized text is a neat, non-redundant design choice for Q16.",
+        "queries_helped": [
+          "Q16"
+        ],
+        "visual_metaphor": "Like checking whether a note contains a few telltale letter fragments before reading the full sentence.",
+        "data_flow": [
+          "Break searchable supplier comments into trigram signatures.",
+          "Store compact trigram metadata alongside the arena offsets.",
+          "At query time, derive trigrams from the LIKE pattern.",
+          "Discard comments missing required trigrams.",
+          "Verify the surviving candidates against the original comment text."
+        ],
+        "novelty_score": 4
+      }
+    ],
+    "query_coverage": [
+      {
+        "query_id": "Q1",
+        "tables_accessed": [
+          "LINEITEM"
+        ],
+        "key_optimizations": [
+          "Shipdate shard min/max metadata",
+          "Micro-AoS revenue cluster",
+          "Discount Tax Lattice"
+        ],
+        "bottleneck": "Large scan over lineitem with date filter and multiple revenue-style aggregates.",
+        "speedup_driver": "Shipdate shard min/max metadata"
+      },
+      {
+        "query_id": "Q2",
+        "tables_accessed": [
+          "PART",
+          "SUPPLIER",
+          "PARTSUPP",
+          "NATION",
+          "REGION"
+        ],
+        "key_optimizations": [
+          "Partsupp two-level composite index",
+          "Nation perfect hash",
+          "Region name map"
+        ],
+        "bottleneck": "Multiway join with part-to-supplier fanout and region/nation filtering.",
+        "speedup_driver": "Partsupp two-level composite index"
+      },
+      {
+        "query_id": "Q3",
+        "tables_accessed": [
+          "CUSTOMER",
+          "ORDERS",
+          "LINEITEM"
+        ],
+        "key_optimizations": [
+          "Customer order map",
+          "Orderkey hash index",
+          "Micro-AoS revenue cluster"
+        ],
+        "bottleneck": "Join chain from filtered customers to orders to lineitems with revenue aggregation.",
+        "speedup_driver": "Customer order map"
+      },
+      {
+        "query_id": "Q4",
+        "tables_accessed": [
+          "ORDERS",
+          "LINEITEM"
+        ],
+        "key_optimizations": [
+          "Temporal fanout map",
+          "Shipdate shard min/max metadata",
+          "Adaptive Shard Temperature"
+        ],
+        "bottleneck": "Date-bounded semi-join between orders and lineitem.",
+        "speedup_driver": "Temporal fanout map"
+      },
+      {
+        "query_id": "Q5",
+        "tables_accessed": [
+          "CUSTOMER",
+          "ORDERS",
+          "LINEITEM",
+          "SUPPLIER",
+          "NATION",
+          "REGION"
+        ],
+        "key_optimizations": [
+          "Nation-clustered CUSTOMER and SUPPLIER layouts",
+          "Orderkey hash index",
+          "Micro-AoS revenue cluster"
+        ],
+        "bottleneck": "Wide join graph ending in revenue aggregation by nation/region.",
+        "speedup_driver": "Nation-clustered CUSTOMER and SUPPLIER layouts"
+      },
+      {
+        "query_id": "Q6",
+        "tables_accessed": [
+          "LINEITEM"
+        ],
+        "key_optimizations": [
+          "Shipdate shard min/max metadata",
+          "Discount Tax Lattice",
+          "Micro-AoS revenue cluster"
+        ],
+        "bottleneck": "Highly selective scan over lineitem with date, discount, and quantity predicates.",
+        "speedup_driver": "Shipdate shard min/max metadata"
+      },
+      {
+        "query_id": "Q7",
+        "tables_accessed": [
+          "SUPPLIER",
+          "LINEITEM",
+          "ORDERS",
+          "CUSTOMER",
+          "NATION"
+        ],
+        "key_optimizations": [
+          "Nation-clustered CUSTOMER and SUPPLIER layouts",
+          "Micro-AoS revenue cluster",
+          "Nation perfect hash"
+        ],
+        "bottleneck": "Country-pair join with time filtering and revenue calculation.",
+        "speedup_driver": "Nation-clustered CUSTOMER and SUPPLIER layouts"
+      },
+      {
+        "query_id": "Q8",
+        "tables_accessed": [
+          "PART",
+          "SUPPLIER",
+          "LINEITEM",
+          "ORDERS",
+          "CUSTOMER",
+          "NATION",
+          "REGION"
+        ],
+        "key_optimizations": [
+          "Region name map",
+          "Nation-clustered dimension layouts",
+          "Micro-AoS revenue cluster"
+        ],
+        "bottleneck": "Join-heavy market share computation with region and part filters.",
+        "speedup_driver": "Region name map"
+      },
+      {
+        "query_id": "Q9",
+        "tables_accessed": [
+          "PART",
+          "SUPPLIER",
+          "LINEITEM",
+          "PARTSUPP",
+          "ORDERS",
+          "NATION"
+        ],
+        "key_optimizations": [
+          "Part name substring accelerator",
+          "Partsupp two-level composite index",
+          "Micro-AoS revenue cluster"
+        ],
+        "bottleneck": "Substring filter on part names plus multiway profit join.",
+        "speedup_driver": "Part name substring accelerator"
+      },
+      {
+        "query_id": "Q10",
+        "tables_accessed": [
+          "CUSTOMER",
+          "ORDERS",
+          "LINEITEM",
+          "NATION"
+        ],
+        "key_optimizations": [
+          "Customer order map",
+          "Orderkey hash index",
+          "Micro-AoS revenue cluster"
+        ],
+        "bottleneck": "Join from returned lineitems back to orders and customers with grouped revenue.",
+        "speedup_driver": "Customer order map"
+      },
+      {
+        "query_id": "Q11",
+        "tables_accessed": [
+          "PARTSUPP",
+          "SUPPLIER",
+          "NATION"
+        ],
+        "key_optimizations": [
+          "Partsupp two-level composite index",
+          "Nation perfect hash",
+          "Nation-clustered SUPPLIER layout"
+        ],
+        "bottleneck": "Supplier-nation restriction over partsupp cost aggregation.",
+        "speedup_driver": "Partsupp two-level composite index"
+      },
+      {
+        "query_id": "Q12",
+        "tables_accessed": [
+          "ORDERS",
+          "LINEITEM"
+        ],
+        "key_optimizations": [
+          "Temporal fanout map",
+          "Shipdate shard min/max metadata",
+          "Dictionary-coded l_shipmode"
+        ],
+        "bottleneck": "Coordinated filtering on shipping mode and date relationships across orders and lineitem.",
+        "speedup_driver": "Temporal fanout map"
+      },
+      {
+        "query_id": "Q13",
+        "tables_accessed": [
+          "CUSTOMER",
+          "ORDERS"
+        ],
+        "key_optimizations": [
+          "o_comment substring token stream",
+          "Customer order map",
+          "Join Tapestry"
+        ],
+        "bottleneck": "Filtering orders by comment pattern and counting customers by order presence.",
+        "speedup_driver": "o_comment substring token stream"
+      },
+      {
+        "query_id": "Q14",
+        "tables_accessed": [
+          "LINEITEM",
+          "PART"
+        ],
+        "key_optimizations": [
+          "Shipdate shard min/max metadata",
+          "Micro-AoS revenue cluster",
+          "Discount Tax Lattice"
+        ],
+        "bottleneck": "Promo revenue aggregation over time-filtered lineitems joined to parts.",
+        "speedup_driver": "Shipdate shard min/max metadata"
+      },
+      {
+        "query_id": "Q15",
+        "tables_accessed": [
+          "LINEITEM",
+          "SUPPLIER"
+        ],
+        "key_optimizations": [
+          "Shipdate shard min/max metadata",
+          "Micro-AoS revenue cluster",
+          "Discount Tax Lattice"
+        ],
+        "bottleneck": "Time-windowed revenue computation before top-supplier selection.",
+        "speedup_driver": "Shipdate shard min/max metadata"
+      },
+      {
+        "query_id": "Q16",
+        "tables_accessed": [
+          "PART",
+          "SUPPLIER",
+          "PARTSUPP"
+        ],
+        "key_optimizations": [
+          "Supplier comment trigram metadata",
+          "Partsupp two-level composite index",
+          "PART clustering by brand/type"
+        ],
+        "bottleneck": "Excluding complaint suppliers while filtering parts by brand/type/size and joining through partsupp.",
+        "speedup_driver": "Supplier comment trigram metadata"
+      },
+      {
+        "query_id": "Q17",
+        "tables_accessed": [
+          "LINEITEM",
+          "PART"
+        ],
+        "key_optimizations": [
+          "PART clustering by brand/type/partkey",
+          "Micro-AoS revenue cluster",
+          "Discount Tax Lattice"
+        ],
+        "bottleneck": "Selective part filter followed by revenue scan over matching lineitems.",
+        "speedup_driver": "PART clustering by brand/type/partkey"
+      },
+      {
+        "query_id": "Q18",
+        "tables_accessed": [
+          "CUSTOMER",
+          "ORDERS",
+          "LINEITEM"
+        ],
+        "key_optimizations": [
+          "Order-contiguous lineitem directory",
+          "Customer order map",
+          "Orderkey hash index"
+        ],
+        "bottleneck": "Finding high-quantity orders and then expanding each order to all its lineitems.",
+        "speedup_driver": "Order-contiguous lineitem directory"
+      },
+      {
+        "query_id": "Q19",
+        "tables_accessed": [
+          "LINEITEM",
+          "PART"
+        ],
+        "key_optimizations": [
+          "PART clustering by brand/type/partkey",
+          "Micro-AoS revenue cluster",
+          "Dictionary-coded container and shipmode"
+        ],
+        "bottleneck": "Complex OR predicates over part attributes plus large revenue scan.",
+        "speedup_driver": "PART clustering by brand/type/partkey"
+      },
+      {
+        "query_id": "Q20",
+        "tables_accessed": [
+          "SUPPLIER",
+          "NATION",
+          "PART",
+          "PARTSUPP",
+          "LINEITEM"
+        ],
+        "key_optimizations": [
+          "Shipdate shard min/max metadata",
+          "Part name substring accelerator",
+          "Partsupp two-level composite index"
+        ],
+        "bottleneck": "Substring part-name filter combined with availability and recent shipment joins.",
+        "speedup_driver": "Part name substring accelerator"
+      },
+      {
+        "query_id": "Q21",
+        "tables_accessed": [
+          "SUPPLIER",
+          "LINEITEM",
+          "ORDERS",
+          "NATION"
+        ],
+        "key_optimizations": [
+          "Order-contiguous lineitem directory",
+          "Nation-clustered SUPPLIER layout",
+          "Join Tapestry"
+        ],
+        "bottleneck": "Order-level existence and non-existence checks across multiple lineitems per order.",
+        "speedup_driver": "Order-contiguous lineitem directory"
+      },
+      {
+        "query_id": "Q22",
+        "tables_accessed": [
+          "CUSTOMER",
+          "ORDERS",
+          "NATION"
+        ],
+        "key_optimizations": [
+          "Anti-join bloom",
+          "Split phone country code",
+          "Nation perfect hash"
+        ],
+        "bottleneck": "Finding customers in phone-country groups who have no orders.",
+        "speedup_driver": "Anti-join bloom"
+      }
+    ],
+    "cross_table_optimizations": [
+      {
+        "name": "Join Tapestry",
+        "tables_involved": [
+          "ORDERS",
+          "LINEITEM",
+          "CUSTOMER",
+          "PARTSUPP",
+          "PART",
+          "SUPPLIER"
+        ],
+        "mechanism": "Compact foreign-key range graph stored as offset arrays linking orders to lineitem ranges, customers to order neighborhoods, and parts/suppliers to partsupp adjacency. Enables vectorized relationship traversal without copying payload data.",
+        "benefit": "Cuts join setup overhead, reduces intermediate materialization, and makes fanout joins feel more like pointer chasing through compressed neighborhoods."
+      },
+      {
+        "name": "Adaptive Shard Temperature",
+        "tables_involved": [
+          "LINEITEM",
+          "ORDERS"
+        ],
+        "mechanism": "Tracks heat scores per date-oriented shard and promotes hot shards into huge-page-backed memory while leaving cold shards more tightly compressed until needed.",
+        "benefit": "Improves scan latency on repeatedly queried recent periods while preserving space efficiency for colder historical data."
+      },
+      {
+        "name": "Anti-join bloom sourced from ORDERS into CUSTOMER",
+        "tables_involved": [
+          "CUSTOMER",
+          "ORDERS"
+        ],
+        "mechanism": "Derived filter over ORDERS.o_custkey stored as metadata near CUSTOMER processing path to cheaply test order absence.",
+        "benefit": "Speeds Q22-style anti-joins by eliminating definitely-unmatched customers before exact probing."
+      },
+      {
+        "name": "Nation/Region dimension key maps",
+        "tables_involved": [
+          "NATION",
+          "REGION",
+          "CUSTOMER",
+          "SUPPLIER",
+          "ORDERS"
+        ],
+        "mechanism": "Perfect-hash and direct-name maps on tiny dimension tables provide constant-time resolution of nation and region predicates used by multiple fact/dimension joins.",
+        "benefit": "Removes repeated tiny-table scans and simplifies selective dimension filtering across many queries."
+      }
+    ],
+    "design_principles": [
+      "Exploit TPC-H\u2019s time filters aggressively through date-centric sharding, compact date encodings, and shard pruning metadata.",
+      "Keep hot analytical paths narrow by isolating cold text and clustering frequently co-accessed numeric measures into SIMD-friendly layouts.",
+      "Treat joins as navigable storage structures, not just runtime operators, using directories, hash lookups, adjacency ranges, and bitmap fanout maps.",
+      "Add metadata rather than redundant data copies: indexes, filters, and range graphs point into base storage instead of duplicating payload columns.",
+      "Use specialized structures only where the benchmark rewards them most, especially for substring predicates, anti-joins, and order-to-lineitem fanout."
+    ],
+    "total_novelty_score": 83
+  },
+  "derived": {
+    "coverage": {
+      "total_queries_covered": 22,
+      "covered_queries": [
+        "Q1",
+        "Q2",
+        "Q3",
+        "Q4",
+        "Q5",
+        "Q6",
+        "Q7",
+        "Q8",
+        "Q9",
+        "Q10",
+        "Q11",
+        "Q12",
+        "Q13",
+        "Q14",
+        "Q15",
+        "Q16",
+        "Q17",
+        "Q18",
+        "Q19",
+        "Q20",
+        "Q21",
+        "Q22"
+      ],
+      "missing_queries": [],
+      "coverage_pct": 100.0,
+      "most_supported_queries": [
+        "Q3",
+        "Q5",
+        "Q9",
+        "Q10",
+        "Q20"
+      ]
+    },
+    "table_insights": [
+      {
+        "table_name": "LINEITEM",
+        "query_count": 16,
+        "technique_count": 2,
+        "index_count": 2,
+        "dominant_encodings": [
+          "custom",
+          "day_offset",
+          "delta",
+          "dictionary",
+          "front_coding",
+          "partitioned",
+          "raw",
+          "scaled_int",
+          "sorted"
+        ],
+        "standout_features": [
+          "Wide columnar segments using SIMD-friendly 1024-row vectors.",
+          "Global dictionaries plus per-segment bitpacking for low-cardinality enums.",
+          "Order-contiguous physical layout via monotonic orderkey alignment.",
+          "Micro-AoS cluster for the four most frequently co-accessed revenue columns."
+        ],
+        "impact_score": 100
+      },
+      {
+        "table_name": "ORDERS",
+        "query_count": 7,
+        "technique_count": 1,
+        "index_count": 3,
+        "dominant_encodings": [
+          "day_offset",
+          "delta",
+          "dictionary",
+          "raw",
+          "rle",
+          "sorted"
+        ],
+        "standout_features": [
+          "Date-first sort order tailored to many TPC-H time predicates.",
+          "Direct hash lookup on orderkey for join-heavy plans.",
+          "Per-customer order traversal structure rather than relying only on scans.",
+          "Month-keyed Roaring bitmaps for semi-join fanout."
+        ],
+        "impact_score": 84
+      },
+      {
+        "table_name": "NATION",
+        "query_count": 10,
+        "technique_count": 0,
+        "index_count": 1,
+        "dominant_encodings": [
+          "dictionary",
+          "raw"
+        ],
+        "standout_features": [
+          "AoS layout chosen because the table is tiny and cache-resident.",
+          "Perfect hash removes branchy tiny-table scans.",
+          "Useful as a dimension anchor in many queries."
+        ],
+        "impact_score": 72
+      },
+      {
+        "table_name": "PARTSUPP",
+        "query_count": 5,
+        "technique_count": 0,
+        "index_count": 1,
+        "dominant_encodings": [
+          "delta",
+          "raw",
+          "sorted",
+          "zigzag"
+        ],
+        "standout_features": [
+          "Composite key physical order specialized for part-to-supplier traversals.",
+          "Two-level index mirrors the table\u2019s natural join graph role.",
+          "Compressed supplier adjacency within each part range.",
+          "sorts by ps_partkey, ps_suppkey"
+        ],
+        "impact_score": 46
+      },
+      {
+        "table_name": "PART",
+        "query_count": 2,
+        "technique_count": 1,
+        "index_count": 1,
+        "dominant_encodings": [
+          "delta",
+          "dictionary",
+          "scaled_int",
+          "sorted",
+          "suffix_array"
+        ],
+        "standout_features": [
+          "Cluster order mirrors common TPC-H part filters.",
+          "Lossless substring acceleration on part names.",
+          "Mix of classic dictionary coding and search-oriented string metadata.",
+          "sorts by p_brand, p_type, p_partkey"
+        ],
+        "impact_score": 44
+      },
+      {
+        "table_name": "CUSTOMER",
+        "query_count": 1,
+        "technique_count": 1,
+        "index_count": 1,
+        "dominant_encodings": [
+          "custom",
+          "dictionary",
+          "front_coding",
+          "raw",
+          "scaled_int",
+          "sorted"
+        ],
+        "standout_features": [
+          "Nation-clustered physical layout for locality in nation joins.",
+          "Phone split into country code plus suffix for code-based filtering.",
+          "String-heavy columns isolated in compressed pools.",
+          "Metadata-only anti-join filter sourced from ORDERS values."
+        ],
+        "impact_score": 38
+      },
+      {
+        "table_name": "SUPPLIER",
+        "query_count": 1,
+        "technique_count": 1,
+        "index_count": 1,
+        "dominant_encodings": [
+          "custom",
+          "raw",
+          "scaled_int",
+          "sorted",
+          "trigram_index"
+        ],
+        "standout_features": [
+          "Nation-clustered supplier layout.",
+          "Pattern-search metadata on comments instead of materialized redundant tokens.",
+          "Designed explicitly for Q16 comment predicate acceleration.",
+          "sorts by s_nationkey, s_suppkey"
+        ],
+        "impact_score": 32
+      },
+      {
+        "table_name": "REGION",
+        "query_count": 3,
+        "technique_count": 0,
+        "index_count": 1,
+        "dominant_encodings": [
+          "dictionary",
+          "raw"
+        ],
+        "standout_features": [
+          "AoS layout keeps region table trivial and cache-hot.",
+          "Precomputed name-to-key mapping avoids even tiny dictionary scans."
+        ],
+        "impact_score": 28
+      }
+    ],
+    "query_insights": [
+      {
+        "query_id": "Q1",
+        "tables_accessed": [
+          "LINEITEM"
+        ],
+        "key_optimizations": [
+          "Shipdate shard min/max metadata",
+          "Micro-AoS revenue cluster",
+          "Discount Tax Lattice"
+        ],
+        "support_score": 69,
+        "primary_bottleneck": "Large scan over lineitem with date filter and multiple revenue-style aggregates.",
+        "speedup_driver": "Shipdate shard min/max metadata",
+        "narrative": "Q1 is carried mainly by discount tax lattice on the lineitem path while adaptive shard temperature keeps the rest of the scan tight.",
+        "storage_narrative": "Q1 is a pure LINEITEM scan, so we store it to cut that scan down fast: month shards drop out up front on shipdate, and the four columns used in the revenue math sit together so one tight pass can produce all the aggregates.",
+        "ui_hook": "Spotlight Discount Tax Lattice first in the storage compare, then frame Shipdate shard min/max metadata as the reason the query path stays fast.",
+        "top_techniques": [
+          "Shipdate pruning",
+          "Revenue columns together"
+        ],
+        "top_technique_details": [
+          {
+            "name": "shipdate_pruning",
+            "display_name": "Shipdate pruning",
+            "explanation": "We split LINEITEM by shipdate ranges, so whole month chunks can be skipped before scanning."
+          },
+          {
+            "name": "revenue_columns_together",
+            "display_name": "Revenue columns together",
+            "explanation": "We keep extended price, discount, tax, and quantity side by side, so the main aggregation loop reads one compact numeric bundle."
+          }
+        ],
+        "highlighted_columns": [
+          "l_shipdate",
+          "l_returnflag",
+          "l_linestatus"
+        ]
+      },
+      {
+        "query_id": "Q2",
+        "tables_accessed": [
+          "PARTSUPP",
+          "PART",
+          "SUPPLIER",
+          "REGION",
+          "NATION"
+        ],
+        "key_optimizations": [
+          "Partsupp two-level composite index",
+          "Nation perfect hash",
+          "Region name map"
+        ],
+        "support_score": 100,
+        "primary_bottleneck": "Multiway join with part-to-supplier fanout and region/nation filtering.",
+        "speedup_driver": "Partsupp two-level composite index",
+        "narrative": "Q2 is carried mainly by join tapestry on the part path.",
+        "storage_narrative": "Q2 lives on the PART to PARTSUPP to SUPPLIER path, with REGION and NATION just narrowing the supplier side. We therefore store PARTSUPP as a part-first lookup structure, so once the part filter hits, the engine can walk straight to the candidate suppliers instead of treating PARTSUPP like a flat table.",
+        "ui_hook": "Spotlight Join Tapestry first in the storage compare, then frame Partsupp two-level composite index as the reason the query path stays fast.",
+        "top_techniques": [
+          "Part-first PARTSUPP lookup",
+          "Direct region lookup",
+          "Nation-aligned suppliers"
+        ],
+        "top_technique_details": [
+          {
+            "name": "part_first_partsupp_lookup",
+            "display_name": "Part-first PARTSUPP lookup",
+            "explanation": "We order PARTSUPP by partkey, then keep a small index that jumps straight to all suppliers for one part."
+          },
+          {
+            "name": "direct_region_lookup",
+            "display_name": "Direct region lookup",
+            "explanation": "We map region names straight to region keys, so the region filter becomes a tiny key check before the larger joins."
+          },
+          {
+            "name": "nation_local_supplier_layout",
+            "display_name": "Nation-aligned suppliers",
+            "explanation": "We keep suppliers from the same nation near each other, so the nation restriction stays local once region has narrowed the set."
+          }
+        ],
+        "highlighted_columns": [
+          "p_partkey",
+          "p_size",
+          "p_type"
+        ]
+      },
+      {
+        "query_id": "Q3",
+        "tables_accessed": [
+          "CUSTOMER",
+          "ORDERS",
+          "LINEITEM"
+        ],
+        "key_optimizations": [
+          "Customer order map",
+          "Orderkey hash index",
+          "Micro-AoS revenue cluster"
+        ],
+        "support_score": 93,
+        "primary_bottleneck": "Join chain from filtered customers to orders to lineitems with revenue aggregation.",
+        "speedup_driver": "Customer order map",
+        "narrative": "Q3 is carried mainly by discount tax lattice on the customer path while join tapestry keeps the rest of the scan tight.",
+        "storage_narrative": "Q3 starts from a market segment in CUSTOMER, follows those customers into ORDERS, then lands on LINEITEM for revenue. We store that path directly: customer-to-order navigation avoids a broad ORDERS scan, and the lineitem revenue fields are packed for a fast final accumulation.",
+        "ui_hook": "Spotlight Discount Tax Lattice first in the storage compare, then frame Customer order map as the reason the query path stays fast.",
+        "top_techniques": [
+          "Customer-to-order navigation",
+          "Fast order lookup",
+          "Revenue columns together"
+        ],
+        "top_technique_details": [
+          {
+            "name": "customer_to_order_navigation",
+            "display_name": "Customer-to-order navigation",
+            "explanation": "We keep a compact map from each customer to their orders, so the join starts from the filtered customers instead of scanning all orders."
+          },
+          {
+            "name": "fast_order_lookup",
+            "display_name": "Fast order lookup",
+            "explanation": "We keep a direct lookup on orderkey, so lineitems can find their matching order row without a bulky hash build."
+          },
+          {
+            "name": "revenue_columns_together",
+            "display_name": "Revenue columns together",
+            "explanation": "We keep the revenue inputs side by side in LINEITEM, so the final sum runs in one compact pass."
+          }
+        ],
+        "highlighted_columns": [
+          "c_mktsegment",
+          "c_custkey",
+          "o_custkey"
+        ]
+      },
+      {
+        "query_id": "Q4",
+        "tables_accessed": [
+          "ORDERS",
+          "LINEITEM"
+        ],
+        "key_optimizations": [
+          "Temporal fanout map",
+          "Shipdate shard min/max metadata",
+          "Adaptive Shard Temperature"
+        ],
+        "support_score": 72,
+        "primary_bottleneck": "Date-bounded semi-join between orders and lineitem.",
+        "speedup_driver": "Temporal fanout map",
+        "narrative": "Q4 is carried mainly by temporal fanout map on the orders path while adaptive shard temperature keeps the rest of the scan tight.",
+        "storage_narrative": "Q4 is really about finding orders in a date window that have qualifying lineitems. We store ORDERS with month-level orderkey bitmaps, so the query can start from the right months immediately, then only touch the matching LINEITEM date slices needed for the existence check.",
+        "ui_hook": "Spotlight Temporal Fanout Map first in the storage compare, then frame Temporal fanout map as the reason the query path stays fast.",
+        "top_techniques": [
+          "Monthly order bitmaps",
+          "Lineitem date pruning"
+        ],
+        "top_technique_details": [
+          {
+            "name": "monthly_order_bitmaps",
+            "display_name": "Monthly order bitmaps",
+            "explanation": "We keep a bitmap of order IDs for each month, so the order-date filter turns into a quick bitmap pick."
+          },
+          {
+            "name": "lineitem_date_pruning",
+            "display_name": "Lineitem date pruning",
+            "explanation": "We split LINEITEM by shipdate ranges, so the semi-join only checks the slices that can still match."
+          }
+        ],
+        "highlighted_columns": [
+          "o_orderdate",
+          "o_orderpriority",
+          "o_orderkey"
+        ]
+      },
+      {
+        "query_id": "Q5",
+        "tables_accessed": [
+          "CUSTOMER",
+          "SUPPLIER",
+          "ORDERS",
+          "LINEITEM",
+          "NATION",
+          "REGION"
+        ],
+        "key_optimizations": [
+          "Nation-clustered CUSTOMER and SUPPLIER layouts",
+          "Orderkey hash index",
+          "Micro-AoS revenue cluster"
+        ],
+        "support_score": 100,
+        "primary_bottleneck": "Wide join graph ending in revenue aggregation by nation/region.",
+        "speedup_driver": "Nation-clustered CUSTOMER and SUPPLIER layouts",
+        "narrative": "Q5 is carried mainly by discount tax lattice on the customer path while join tapestry keeps the rest of the scan tight.",
+        "storage_narrative": "Q5 walks a long region-to-nation-to-customer-to-orders-to-lineitem chain and then groups revenue by nation. We store CUSTOMER and SUPPLIER clustered by nation so the geography filters stay tight, then let ORDERS and LINEITEM carry the narrowed set through to the revenue scan.",
+        "ui_hook": "Spotlight Discount Tax Lattice first in the storage compare, then frame Nation-clustered CUSTOMER and SUPPLIER layouts as the reason the query path stays fast.",
+        "top_techniques": [
+          "Nation-clustered customers and suppliers",
+          "Fast order lookup",
+          "Revenue columns together"
+        ],
+        "top_technique_details": [
+          {
+            "name": "nation_clustered_dimensions",
+            "display_name": "Nation-clustered customers and suppliers",
+            "explanation": "We keep CUSTOMER and SUPPLIER grouped by nation, so the region and nation filters narrow both sides early."
+          },
+          {
+            "name": "fast_order_lookup",
+            "display_name": "Fast order lookup",
+            "explanation": "We keep a direct lookup on orderkey, so the join from lineitems back to orders stays compact."
+          },
+          {
+            "name": "revenue_columns_together",
+            "display_name": "Revenue columns together",
+            "explanation": "We keep the LINEITEM revenue inputs together, so the grouped revenue pass reads a narrow hot path."
+          }
+        ],
+        "highlighted_columns": [
+          "r_name",
+          "n_nationkey",
+          "s_nationkey"
+        ]
+      },
+      {
+        "query_id": "Q6",
+        "tables_accessed": [
+          "LINEITEM"
+        ],
+        "key_optimizations": [
+          "Shipdate shard min/max metadata",
+          "Discount Tax Lattice",
+          "Micro-AoS revenue cluster"
+        ],
+        "support_score": 69,
+        "primary_bottleneck": "Highly selective scan over lineitem with date, discount, and quantity predicates.",
+        "speedup_driver": "Shipdate shard min/max metadata",
+        "narrative": "Q6 is carried mainly by discount tax lattice on the lineitem path while adaptive shard temperature keeps the rest of the scan tight.",
+        "storage_narrative": "Q6 is a selective LINEITEM filter on shipdate, discount, and quantity. We store LINEITEM so the date window knocks out most shards before scan, and the hot numeric fields needed for the predicate and revenue sum are already packed together.",
+        "ui_hook": "Spotlight Discount Tax Lattice first in the storage compare, then frame Shipdate shard min/max metadata as the reason the query path stays fast.",
+        "top_techniques": [
+          "Shipdate pruning",
+          "Packed numeric filter path"
+        ],
+        "top_technique_details": [
+          {
+            "name": "shipdate_pruning",
+            "display_name": "Shipdate pruning",
+            "explanation": "We split LINEITEM by shipdate ranges, so only the months in the filter need to be opened."
+          },
+          {
+            "name": "packed_numeric_filter_path",
+            "display_name": "Packed numeric filter path",
+            "explanation": "We keep quantity, discount, and extended price together, so the filter and revenue math run from one compact read path."
+          }
+        ],
+        "highlighted_columns": [
+          "l_shipdate",
+          "l_discount",
+          "l_quantity"
+        ]
+      },
+      {
+        "query_id": "Q7",
+        "tables_accessed": [
+          "CUSTOMER",
+          "SUPPLIER",
+          "LINEITEM",
+          "ORDERS",
+          "NATION"
+        ],
+        "key_optimizations": [
+          "Nation-clustered CUSTOMER and SUPPLIER layouts",
+          "Micro-AoS revenue cluster",
+          "Nation perfect hash"
+        ],
+        "support_score": 100,
+        "primary_bottleneck": "Country-pair join with time filtering and revenue calculation.",
+        "speedup_driver": "Nation-clustered CUSTOMER and SUPPLIER layouts",
+        "narrative": "Q7 is carried mainly by discount tax lattice on the supplier path while adaptive shard temperature keeps the rest of the scan tight.",
+        "storage_narrative": "Q7 compares revenue across supplier and customer nations over time, so locality on both nation joins matters more than fancy arithmetic. We cluster CUSTOMER and SUPPLIER by nation, which keeps the country-pair join path tight before LINEITEM does the final revenue work.",
+        "ui_hook": "Spotlight Discount Tax Lattice first in the storage compare, then frame Nation-clustered CUSTOMER and SUPPLIER layouts as the reason the query path stays fast.",
+        "top_techniques": [
+          "Nation-clustered join endpoints",
+          "Tiny nation lookups",
+          "Revenue columns together"
+        ],
+        "top_technique_details": [
+          {
+            "name": "nation_clustered_endpoints",
+            "display_name": "Nation-clustered join endpoints",
+            "explanation": "We keep CUSTOMER and SUPPLIER grouped by nation, so both sides of the country-pair join stay local."
+          },
+          {
+            "name": "tiny_nation_lookups",
+            "display_name": "Tiny nation lookups",
+            "explanation": "We keep NATION as a tiny direct-lookup table, so resolving nation keys adds almost no overhead."
+          },
+          {
+            "name": "revenue_columns_together",
+            "display_name": "Revenue columns together",
+            "explanation": "We keep the LINEITEM revenue inputs together, so the grouped sum runs through a narrow numeric path."
+          }
+        ],
+        "highlighted_columns": [
+          "c_nationkey",
+          "s_nationkey",
+          "n_nationkey"
+        ]
+      },
+      {
+        "query_id": "Q8",
+        "tables_accessed": [
+          "REGION",
+          "NATION",
+          "CUSTOMER",
+          "SUPPLIER",
+          "PART",
+          "ORDERS",
+          "LINEITEM"
+        ],
+        "key_optimizations": [
+          "Region name map",
+          "Nation-clustered dimension layouts",
+          "Micro-AoS revenue cluster"
+        ],
+        "support_score": 100,
+        "primary_bottleneck": "Join-heavy market share computation with region and part filters.",
+        "speedup_driver": "Region name map",
+        "narrative": "Q8 is carried mainly by discount tax lattice on the part path while adaptive shard temperature keeps the rest of the scan tight.",
+        "storage_narrative": "Q8 mixes a region filter, nation joins, a part filter, and a revenue share calculation. We make REGION and NATION nearly free to resolve, then rely on nation-clustered CUSTOMER and SUPPLIER storage so the larger joins stay tidy before LINEITEM contributes the revenue math.",
+        "ui_hook": "Spotlight Discount Tax Lattice first in the storage compare, then frame Region name map as the reason the query path stays fast.",
+        "top_techniques": [
+          "Direct region lookup",
+          "Nation-clustered customers and suppliers",
+          "Revenue columns together"
+        ],
+        "top_technique_details": [
+          {
+            "name": "direct_region_lookup",
+            "display_name": "Direct region lookup",
+            "explanation": "We map region names straight to region keys, so the query starts with a tiny lookup instead of a dimension scan."
+          },
+          {
+            "name": "nation_clustered_dimensions",
+            "display_name": "Nation-clustered customers and suppliers",
+            "explanation": "We keep CUSTOMER and SUPPLIER grouped by nation, so the regional join path stays local as it expands."
+          },
+          {
+            "name": "revenue_columns_together",
+            "display_name": "Revenue columns together",
+            "explanation": "We keep LINEITEM revenue fields together, so the market-share calculation reads one compact numeric bundle."
+          }
+        ],
+        "highlighted_columns": [
+          "r_name",
+          "n_name",
+          "c_nationkey"
+        ]
+      },
+      {
+        "query_id": "Q9",
+        "tables_accessed": [
+          "PART",
+          "PARTSUPP",
+          "LINEITEM",
+          "SUPPLIER",
+          "ORDERS",
+          "NATION"
+        ],
+        "key_optimizations": [
+          "Part name substring accelerator",
+          "Partsupp two-level composite index",
+          "Micro-AoS revenue cluster"
+        ],
+        "support_score": 100,
+        "primary_bottleneck": "Substring filter on part names plus multiway profit join.",
+        "speedup_driver": "Part name substring accelerator",
+        "narrative": "Q9 is carried mainly by discount tax lattice on the part path while join tapestry keeps the rest of the scan tight.",
+        "storage_narrative": "Q9 begins with a contains-style filter on PART name, then fans out through PARTSUPP and LINEITEM into profit calculation. We store PART names with exact substring search support, and we keep PARTSUPP in part-first order so matching parts can immediately pull their supplier rows.",
+        "ui_hook": "Spotlight Discount Tax Lattice first in the storage compare, then frame Part name substring accelerator as the reason the query path stays fast.",
+        "top_techniques": [
+          "Part-name contains search",
+          "Part-first PARTSUPP lookup",
+          "Revenue columns together"
+        ],
+        "top_technique_details": [
+          {
+            "name": "part_name_contains_search",
+            "display_name": "Part-name contains search",
+            "explanation": "We add substring search metadata on p_name, so the query can jump to parts whose names contain the target text."
+          },
+          {
+            "name": "part_first_partsupp_lookup",
+            "display_name": "Part-first PARTSUPP lookup",
+            "explanation": "We order PARTSUPP by partkey, so each matching part can jump straight to its supplier rows."
+          },
+          {
+            "name": "revenue_columns_together",
+            "display_name": "Revenue columns together",
+            "explanation": "We keep the hot LINEITEM money columns together, so profit math runs in a tight scan."
+          }
+        ],
+        "highlighted_columns": [
+          "p_name",
+          "p_partkey",
+          "ps_partkey"
+        ]
+      },
+      {
+        "query_id": "Q10",
+        "tables_accessed": [
+          "LINEITEM",
+          "ORDERS",
+          "CUSTOMER",
+          "NATION"
+        ],
+        "key_optimizations": [
+          "Customer order map",
+          "Orderkey hash index",
+          "Micro-AoS revenue cluster"
+        ],
+        "support_score": 100,
+        "primary_bottleneck": "Join from returned lineitems back to orders and customers with grouped revenue.",
+        "speedup_driver": "Customer order map",
+        "narrative": "Q10 is carried mainly by discount tax lattice on the customer path while join tapestry keeps the rest of the scan tight.",
+        "storage_narrative": "Q10 starts from returned lineitems, then moves back through orders to customers and nation. We store customer-to-order links explicitly, so once qualifying orders are known, the customer side is cheap to reach and the revenue total still runs on the compact LINEITEM numeric path.",
+        "ui_hook": "Spotlight Discount Tax Lattice first in the storage compare, then frame Customer order map as the reason the query path stays fast.",
+        "top_techniques": [
+          "Customer-to-order navigation",
+          "Fast order lookup",
+          "Revenue columns together"
+        ],
+        "top_technique_details": [
+          {
+            "name": "customer_to_order_navigation",
+            "display_name": "Customer-to-order navigation",
+            "explanation": "We keep a compact map from each customer to their orders, so customer revenue grouping does not need a broad orders pass."
+          },
+          {
+            "name": "fast_order_lookup",
+            "display_name": "Fast order lookup",
+            "explanation": "We keep a direct lookup on orderkey, so returned lineitems can find their order rows immediately."
+          },
+          {
+            "name": "revenue_columns_together",
+            "display_name": "Revenue columns together",
+            "explanation": "We keep LINEITEM revenue inputs side by side, so the sum for each customer stays on a narrow hot path."
+          }
+        ],
+        "highlighted_columns": [
+          "l_returnflag",
+          "l_orderkey",
+          "l_extendedprice"
+        ]
+      },
+      {
+        "query_id": "Q11",
+        "tables_accessed": [
+          "PARTSUPP",
+          "SUPPLIER",
+          "NATION"
+        ],
+        "key_optimizations": [
+          "Partsupp two-level composite index",
+          "Nation perfect hash",
+          "Nation-clustered SUPPLIER layout"
+        ],
+        "support_score": 90,
+        "primary_bottleneck": "Supplier-nation restriction over partsupp cost aggregation.",
+        "speedup_driver": "Partsupp two-level composite index",
+        "narrative": "Q11 is carried mainly by join tapestry on the partsupp path.",
+        "storage_narrative": "Q11 is mostly a supplier-nation restriction over PARTSUPP value totals, so the important storage choice is how quickly we can walk supplier lists for each part. PARTSUPP is laid out for that exact pattern, while SUPPLIER stays grouped by nation so the nation filter trims the supplier side early.",
+        "ui_hook": "Spotlight Join Tapestry first in the storage compare, then frame Partsupp two-level composite index as the reason the query path stays fast.",
+        "top_techniques": [
+          "Part-first PARTSUPP lookup",
+          "Nation-aligned suppliers",
+          "Tiny nation lookups"
+        ],
+        "top_technique_details": [
+          {
+            "name": "part_first_partsupp_lookup",
+            "display_name": "Part-first PARTSUPP lookup",
+            "explanation": "We order PARTSUPP by partkey, so the engine can walk compact supplier lists instead of scanning the whole table."
+          },
+          {
+            "name": "nation_aligned_suppliers",
+            "display_name": "Nation-aligned suppliers",
+            "explanation": "We keep suppliers from the same nation together, so the nation restriction is applied in a tight slice."
+          },
+          {
+            "name": "tiny_nation_lookups",
+            "display_name": "Tiny nation lookups",
+            "explanation": "We keep NATION as a tiny direct-lookup table, so nation filtering stays trivial."
+          }
+        ],
+        "highlighted_columns": [
+          "ps_partkey",
+          "ps_suppkey",
+          "ps_supplycost"
+        ]
+      },
+      {
+        "query_id": "Q12",
+        "tables_accessed": [
+          "ORDERS",
+          "LINEITEM"
+        ],
+        "key_optimizations": [
+          "Temporal fanout map",
+          "Shipdate shard min/max metadata",
+          "Dictionary-coded l_shipmode"
+        ],
+        "support_score": 72,
+        "primary_bottleneck": "Coordinated filtering on shipping mode and date relationships across orders and lineitem.",
+        "speedup_driver": "Temporal fanout map",
+        "narrative": "Q12 is carried mainly by temporal fanout map on the orders path while adaptive shard temperature keeps the rest of the scan tight.",
+        "storage_narrative": "Q12 combines shipping mode filters with order-month logic and date relationships inside LINEITEM. We therefore store the order side as month bitmaps and keep LINEITEM split by shipdate, so both halves of the query shed work before the join even starts.",
+        "ui_hook": "Spotlight Temporal Fanout Map first in the storage compare, then frame Temporal fanout map as the reason the query path stays fast.",
+        "top_techniques": [
+          "Monthly order bitmaps",
+          "Shipdate pruning",
+          "Compact shipmode codes"
+        ],
+        "top_technique_details": [
+          {
+            "name": "monthly_order_bitmaps",
+            "display_name": "Monthly order bitmaps",
+            "explanation": "We keep a bitmap of order IDs for each month, so the order-date window becomes a quick bitmap probe."
+          },
+          {
+            "name": "shipdate_pruning",
+            "display_name": "Shipdate pruning",
+            "explanation": "We split LINEITEM by shipdate ranges, so only the relevant date slices are scanned."
+          },
+          {
+            "name": "compact_shipmode_codes",
+            "display_name": "Compact shipmode codes",
+            "explanation": "We store ship modes as tiny dictionary codes, so the mode filter is cheap to evaluate during the scan."
+          }
+        ],
+        "highlighted_columns": [
+          "o_orderdate",
+          "o_orderkey",
+          "l_orderkey"
+        ]
+      },
+      {
+        "query_id": "Q13",
+        "tables_accessed": [
+          "ORDERS",
+          "CUSTOMER"
+        ],
+        "key_optimizations": [
+          "o_comment substring token stream",
+          "Customer order map",
+          "Join Tapestry"
+        ],
+        "support_score": 78,
+        "primary_bottleneck": "Filtering orders by comment pattern and counting customers by order presence.",
+        "speedup_driver": "o_comment substring token stream",
+        "narrative": "Q13 is carried mainly by join tapestry on the customer path.",
+        "storage_narrative": "Q13 is all about excluding orders whose comments match a phrase and then counting customers by how many orders remain. We store order comments in a tokenized text path so the phrase filter avoids full string scans, and we keep customer-to-order navigation so the final customer counts follow the surviving orders directly.",
+        "ui_hook": "Spotlight Join Tapestry first in the storage compare, then frame o_comment substring token stream as the reason the query path stays fast.",
+        "top_techniques": [
+          "Tokenized order comments",
+          "Customer-to-order navigation"
+        ],
+        "top_technique_details": [
+          {
+            "name": "tokenized_order_comments",
+            "display_name": "Tokenized order comments",
+            "explanation": "We store common comment fragments as compact tokens, so the comment filter can narrow orders without reading full text."
+          },
+          {
+            "name": "customer_to_order_navigation",
+            "display_name": "Customer-to-order navigation",
+            "explanation": "We keep a compact map from each customer to their orders, so customer counts follow the filtered order set directly."
+          }
+        ],
+        "highlighted_columns": [
+          "o_comment",
+          "o_orderkey",
+          "o_custkey"
+        ]
+      },
+      {
+        "query_id": "Q14",
+        "tables_accessed": [
+          "LINEITEM",
+          "PART"
+        ],
+        "key_optimizations": [
+          "Shipdate shard min/max metadata",
+          "Micro-AoS revenue cluster",
+          "Discount Tax Lattice"
+        ],
+        "support_score": 81,
+        "primary_bottleneck": "Promo revenue aggregation over time-filtered lineitems joined to parts.",
+        "speedup_driver": "Shipdate shard min/max metadata",
+        "narrative": "Q14 is carried mainly by discount tax lattice on the lineitem path while adaptive shard temperature keeps the rest of the scan tight.",
+        "storage_narrative": "Q14 is a date-bounded promo revenue query, so the key is to thin LINEITEM first and only then check which rows join to promo parts. We store LINEITEM in shipdate shards and keep its money columns together, which makes the promo numerator and total denominator cheap to compute in the same pass.",
+        "ui_hook": "Spotlight Discount Tax Lattice first in the storage compare, then frame Shipdate shard min/max metadata as the reason the query path stays fast.",
+        "top_techniques": [
+          "Shipdate pruning",
+          "Revenue columns together"
+        ],
+        "top_technique_details": [
+          {
+            "name": "shipdate_pruning",
+            "display_name": "Shipdate pruning",
+            "explanation": "We split LINEITEM by shipdate ranges, so the promo month can be isolated before scanning."
+          },
+          {
+            "name": "revenue_columns_together",
+            "display_name": "Revenue columns together",
+            "explanation": "We keep extended price and discount beside the other hot numeric fields, so promo and total revenue can be computed in one compact pass."
+          }
+        ],
+        "highlighted_columns": [
+          "l_shipdate",
+          "l_extendedprice",
+          "l_discount"
+        ]
+      },
+      {
+        "query_id": "Q15",
+        "tables_accessed": [
+          "LINEITEM",
+          "SUPPLIER"
+        ],
+        "key_optimizations": [
+          "Shipdate shard min/max metadata",
+          "Micro-AoS revenue cluster",
+          "Discount Tax Lattice"
+        ],
+        "support_score": 81,
+        "primary_bottleneck": "Time-windowed revenue computation before top-supplier selection.",
+        "speedup_driver": "Shipdate shard min/max metadata",
+        "narrative": "Q15 is carried mainly by discount tax lattice on the lineitem path while adaptive shard temperature keeps the rest of the scan tight.",
+        "storage_narrative": "Q15 computes supplier revenue inside a time window and then finds the top supplier. We store LINEITEM so that the date window drops most shards immediately, and the supplier-facing revenue scan only touches the compact numeric columns needed for the per-supplier total.",
+        "ui_hook": "Spotlight Discount Tax Lattice first in the storage compare, then frame Shipdate shard min/max metadata as the reason the query path stays fast.",
+        "top_techniques": [
+          "Shipdate pruning",
+          "Revenue columns together"
+        ],
+        "top_technique_details": [
+          {
+            "name": "shipdate_pruning",
+            "display_name": "Shipdate pruning",
+            "explanation": "We split LINEITEM by shipdate ranges, so the revenue window reads only the needed months."
+          },
+          {
+            "name": "revenue_columns_together",
+            "display_name": "Revenue columns together",
+            "explanation": "We keep the hot money columns together, so per-supplier revenue totals come from one compact scan path."
+          }
+        ],
+        "highlighted_columns": [
+          "l_shipdate",
+          "l_extendedprice",
+          "l_discount"
+        ]
+      },
+      {
+        "query_id": "Q16",
+        "tables_accessed": [
+          "PART",
+          "SUPPLIER",
+          "PARTSUPP"
+        ],
+        "key_optimizations": [
+          "Supplier comment trigram metadata",
+          "Partsupp two-level composite index",
+          "PART clustering by brand/type"
+        ],
+        "support_score": 78,
+        "primary_bottleneck": "Excluding complaint suppliers while filtering parts by brand/type/size and joining through partsupp.",
+        "speedup_driver": "Supplier comment trigram metadata",
+        "narrative": "Q16 is carried mainly by supplier comment complaint trigram filter on the part path.",
+        "storage_narrative": "Q16 filters PART heavily, excludes suppliers by a complaint phrase, and then joins through PARTSUPP. We store exactly for that shape: PART is clustered by the part attributes used in the filter, supplier comments have a lightweight text filter, and PARTSUPP is ordered so surviving parts can pull their supplier lists directly.",
+        "ui_hook": "Spotlight Supplier Comment Complaint Trigram Filter first in the storage compare, then frame Supplier comment trigram metadata as the reason the query path stays fast.",
+        "top_techniques": [
+          "Supplier comment pattern filter",
+          "Part-clustered filters",
+          "Part-first PARTSUPP lookup"
+        ],
+        "top_technique_details": [
+          {
+            "name": "supplier_comment_pattern_filter",
+            "display_name": "Supplier comment pattern filter",
+            "explanation": "We keep trigram search metadata on supplier comments, so the complaint phrase can be checked without reading every comment."
+          },
+          {
+            "name": "part_clustered_for_filters",
+            "display_name": "Part-clustered filters",
+            "explanation": "We group PART by brand and type, so the main part restrictions land on tight ranges."
+          },
+          {
+            "name": "part_first_partsupp_lookup",
+            "display_name": "Part-first PARTSUPP lookup",
+            "explanation": "We order PARTSUPP by partkey, so each surviving part can jump straight to its supplier rows."
+          }
+        ],
+        "highlighted_columns": [
+          "p_brand",
+          "p_type",
+          "p_size"
+        ]
+      },
+      {
+        "query_id": "Q17",
+        "tables_accessed": [
+          "PART",
+          "LINEITEM"
+        ],
+        "key_optimizations": [
+          "PART clustering by brand/type/partkey",
+          "Micro-AoS revenue cluster",
+          "Discount Tax Lattice"
+        ],
+        "support_score": 81,
+        "primary_bottleneck": "Selective part filter followed by revenue scan over matching lineitems.",
+        "speedup_driver": "PART clustering by brand/type/partkey",
+        "narrative": "Q17 is carried mainly by discount tax lattice on the lineitem path.",
+        "storage_narrative": "Q17 first isolates a narrow set of parts, then evaluates quantity-related revenue on their lineitems. We cluster PART by the exact attributes used in the filter, which makes the part side small fast, and then let LINEITEM's packed numeric layout handle the revenue scan over just the matching partkeys.",
+        "ui_hook": "Spotlight Discount Tax Lattice first in the storage compare, then frame PART clustering by brand/type/partkey as the reason the query path stays fast.",
+        "top_techniques": [
+          "Part-clustered filters",
+          "Packed numeric scan"
+        ],
+        "top_technique_details": [
+          {
+            "name": "part_clustered_for_filters",
+            "display_name": "Part-clustered filters",
+            "explanation": "We group PART by brand and type, so the qualifying partkeys come from a tight range instead of a wide scan."
+          },
+          {
+            "name": "packed_numeric_scan",
+            "display_name": "Packed numeric scan",
+            "explanation": "We keep LINEITEM quantity and revenue fields together, so the follow-on scan over matching parts stays compact."
+          }
+        ],
+        "highlighted_columns": [
+          "p_brand",
+          "p_container",
+          "p_partkey"
+        ]
+      },
+      {
+        "query_id": "Q18",
+        "tables_accessed": [
+          "LINEITEM",
+          "ORDERS",
+          "CUSTOMER"
+        ],
+        "key_optimizations": [
+          "Order-contiguous lineitem directory",
+          "Customer order map",
+          "Orderkey hash index"
+        ],
+        "support_score": 90,
+        "primary_bottleneck": "Finding high-quantity orders and then expanding each order to all its lineitems.",
+        "speedup_driver": "Order-contiguous lineitem directory",
+        "narrative": "Q18 is carried mainly by join tapestry on the customer path while order-contiguous lineitem directory keeps the rest of the scan tight.",
+        "storage_narrative": "Q18 finds large orders and then has to expand each one back out to all of its lineitems. We store LINEITEM with each order's rows adjacent and keep a small directory from orderkey to row range, so once an order qualifies, the engine can jump straight to that order's slice instead of rediscovering it through a full scan.",
+        "ui_hook": "Spotlight Join Tapestry first in the storage compare, then frame Order-contiguous lineitem directory as the reason the query path stays fast.",
+        "top_techniques": [
+          "Order-aligned lineitems",
+          "Order range directory",
+          "Customer-to-order navigation"
+        ],
+        "top_technique_details": [
+          {
+            "name": "order_aligned_lineitems",
+            "display_name": "Order-aligned lineitems",
+            "explanation": "We keep all lineitems for one order together, so expanding a qualifying order means reading one compact slice."
+          },
+          {
+            "name": "order_range_directory",
+            "display_name": "Order range directory",
+            "explanation": "We keep a small map from orderkey to row range, so the engine can jump straight to that order's lineitems."
+          },
+          {
+            "name": "customer_to_order_navigation",
+            "display_name": "Customer-to-order navigation",
+            "explanation": "We keep a compact map from each customer to their orders, so the final customer join follows the qualified orders directly."
+          }
+        ],
+        "highlighted_columns": [
+          "l_orderkey",
+          "l_quantity",
+          "o_orderkey"
+        ]
+      },
+      {
+        "query_id": "Q19",
+        "tables_accessed": [
+          "PART",
+          "LINEITEM"
+        ],
+        "key_optimizations": [
+          "PART clustering by brand/type/partkey",
+          "Micro-AoS revenue cluster",
+          "Dictionary-coded container and shipmode"
+        ],
+        "support_score": 81,
+        "primary_bottleneck": "Complex OR predicates over part attributes plus large revenue scan.",
+        "speedup_driver": "PART clustering by brand/type/partkey",
+        "narrative": "Q19 is carried mainly by discount tax lattice on the lineitem path.",
+        "storage_narrative": "Q19 is driven by a messy OR over part attributes plus shipping filters, followed by revenue aggregation. We cluster PART by the part attributes that define the OR branches, so the query can gather matching partkeys efficiently, and LINEITEM keeps the numeric and small categorical columns needed for the final filter-and-sum path close at hand.",
+        "ui_hook": "Spotlight Discount Tax Lattice first in the storage compare, then frame PART clustering by brand/type/partkey as the reason the query path stays fast.",
+        "top_techniques": [
+          "Part-clustered OR filters",
+          "Compact shipping codes",
+          "Revenue columns together"
+        ],
+        "top_technique_details": [
+          {
+            "name": "part_clustered_for_or_filters",
+            "display_name": "Part-clustered OR filters",
+            "explanation": "We group PART by brand and type, so each branch of the part predicate hits a tight range of partkeys."
+          },
+          {
+            "name": "compact_shipping_codes",
+            "display_name": "Compact shipping codes",
+            "explanation": "We store container and shipmode as tiny codes, so the shipping filters are cheap to test during the scan."
+          },
+          {
+            "name": "revenue_columns_together",
+            "display_name": "Revenue columns together",
+            "explanation": "We keep the LINEITEM money columns together, so the final revenue pass stays narrow."
+          }
+        ],
+        "highlighted_columns": [
+          "p_brand",
+          "p_container",
+          "p_size"
+        ]
+      },
+      {
+        "query_id": "Q20",
+        "tables_accessed": [
+          "PART",
+          "LINEITEM",
+          "PARTSUPP",
+          "SUPPLIER",
+          "NATION"
+        ],
+        "key_optimizations": [
+          "Shipdate shard min/max metadata",
+          "Part name substring accelerator",
+          "Partsupp two-level composite index"
+        ],
+        "support_score": 100,
+        "primary_bottleneck": "Substring part-name filter combined with availability and recent shipment joins.",
+        "speedup_driver": "Part name substring accelerator",
+        "narrative": "Q20 is carried mainly by join tapestry on the supplier path while adaptive shard temperature keeps the rest of the scan tight.",
+        "storage_narrative": "Q20 starts with a part-name substring match, narrows to recent shipments, and then checks supplier availability through PARTSUPP. We store PART names with exact substring search support, prune LINEITEM hard by shipdate, and keep PARTSUPP in part-first order so the surviving parts can drive the rest of the join.",
+        "ui_hook": "Spotlight Join Tapestry first in the storage compare, then frame Part name substring accelerator as the reason the query path stays fast.",
+        "top_techniques": [
+          "Part-name contains search",
+          "Shipdate pruning",
+          "Part-first PARTSUPP lookup"
+        ],
+        "top_technique_details": [
+          {
+            "name": "part_name_contains_search",
+            "display_name": "Part-name contains search",
+            "explanation": "We add substring search metadata on p_name, so the color filter jumps straight to candidate parts."
+          },
+          {
+            "name": "shipdate_pruning",
+            "display_name": "Shipdate pruning",
+            "explanation": "We split LINEITEM by shipdate ranges, so only recent shipment slices are scanned."
+          },
+          {
+            "name": "part_first_partsupp_lookup",
+            "display_name": "Part-first PARTSUPP lookup",
+            "explanation": "We order PARTSUPP by partkey, so matching parts can pull supplier availability rows directly."
+          }
+        ],
+        "highlighted_columns": [
+          "p_name",
+          "p_partkey",
+          "l_shipdate"
+        ]
+      },
+      {
+        "query_id": "Q21",
+        "tables_accessed": [
+          "LINEITEM",
+          "SUPPLIER",
+          "ORDERS",
+          "NATION"
+        ],
+        "key_optimizations": [
+          "Order-contiguous lineitem directory",
+          "Nation-clustered SUPPLIER layout",
+          "Join Tapestry"
+        ],
+        "support_score": 100,
+        "primary_bottleneck": "Order-level existence and non-existence checks across multiple lineitems per order.",
+        "speedup_driver": "Order-contiguous lineitem directory",
+        "narrative": "Q21 is carried mainly by join tapestry on the supplier path while order-contiguous lineitem directory keeps the rest of the scan tight.",
+        "storage_narrative": "Q21 does repeated existence and non-existence checks across multiple lineitems of the same order, so keeping order rows scattered would be painful. Instead, LINEITEM stores each order as one contiguous run, which lets the query inspect all sibling lineitems for an order in place while SUPPLIER's nation clustering keeps the supplier side tight.",
+        "ui_hook": "Spotlight Join Tapestry first in the storage compare, then frame Order-contiguous lineitem directory as the reason the query path stays fast.",
+        "top_techniques": [
+          "Order-aligned lineitems",
+          "Order range directory",
+          "Nation-aligned suppliers"
+        ],
+        "top_technique_details": [
+          {
+            "name": "order_aligned_lineitems",
+            "display_name": "Order-aligned lineitems",
+            "explanation": "We keep all lineitems for one order together, so existence checks over sibling lines stay inside one compact slice."
+          },
+          {
+            "name": "order_range_directory",
+            "display_name": "Order range directory",
+            "explanation": "We keep a small map from orderkey to row range, so the engine can jump straight to an order's full set of lines."
+          },
+          {
+            "name": "nation_aligned_suppliers",
+            "display_name": "Nation-aligned suppliers",
+            "explanation": "We keep suppliers from the same nation together, so the supplier-side restriction stays local."
+          }
+        ],
+        "highlighted_columns": [
+          "l_orderkey",
+          "l_receiptdate",
+          "l_commitdate"
+        ]
+      },
+      {
+        "query_id": "Q22",
+        "tables_accessed": [
+          "CUSTOMER",
+          "ORDERS",
+          "NATION"
+        ],
+        "key_optimizations": [
+          "Anti-join bloom",
+          "Split phone country code",
+          "Nation perfect hash"
+        ],
+        "support_score": 81,
+        "primary_bottleneck": "Finding customers in phone-country groups who have no orders.",
+        "speedup_driver": "Anti-join bloom",
+        "narrative": "Q22 is carried mainly by anti-join bloom on the customer path.",
+        "storage_narrative": "Q22 is mostly about proving a customer has no orders after filtering by phone country code and account balance. We store a compact 'has orders' filter next to the customer path, so most customers can be ruled out without touching ORDERS at all, and the phone column is split so the country-code test does not need a full string scan.",
+        "ui_hook": "Spotlight Anti-Join Bloom first in the storage compare, then frame Anti-join bloom as the reason the query path stays fast.",
+        "top_techniques": [
+          "Customers-with-no-orders filter",
+          "Split phone country code",
+          "Tiny nation lookups"
+        ],
+        "top_technique_details": [
+          {
+            "name": "customers_with_no_orders_filter",
+            "display_name": "Customers-with-no-orders filter",
+            "explanation": "We keep a compact membership filter from ORDERS customer keys, so customers with definitely no orders can be identified immediately."
+          },
+          {
+            "name": "split_phone_country_code",
+            "display_name": "Split phone country code",
+            "explanation": "We store the phone country code separately, so the country filter avoids scanning full phone strings."
+          },
+          {
+            "name": "tiny_nation_lookups",
+            "display_name": "Tiny nation lookups",
+            "explanation": "We keep NATION as a tiny direct-lookup table, so the final grouping step stays cheap."
+          }
+        ],
+        "highlighted_columns": [
+          "c_phone",
+          "c_custkey",
+          "c_acctbal"
+        ]
+      }
+    ],
+    "technique_leaderboard": [
+      {
+        "rank": 1,
+        "name": "Discount Tax Lattice",
+        "table": "LINEITEM",
+        "category": "encoding",
+        "novelty_score": 9,
+        "impact_queries": 12,
+        "why_it_matters": "Most OLAP engines either store scaled integers directly or use generic compression. This design treats common arithmetic columns like a tiny learned codec, but still guarantees exact reconstruction. It supports 12 query paths."
+      },
+      {
+        "rank": 2,
+        "name": "Join Tapestry",
+        "table": "cross-table",
+        "category": "join_acceleration",
+        "novelty_score": 8,
+        "impact_queries": 10,
+        "why_it_matters": "It turns the schema graph into a physical navigation structure, somewhere between adjacency lists and join indexes, while staying metadata-only. That is more explicit and presentation-friendly than standard per-table indexes alone. It supports 10 query paths."
+      },
+      {
+        "rank": 3,
+        "name": "Order-Contiguous Lineitem Directory",
+        "table": "LINEITEM",
+        "category": "join_acceleration",
+        "novelty_score": 6,
+        "impact_queries": 2,
+        "why_it_matters": "The pieces are individually familiar, but the deliberate pairing of monotonic orderkey storage, contiguous order grouping, and sparse range lookup is an especially clean fit for TPC-H\u2019s order-to-lineitem fanout queries. It supports 2 query paths."
+      },
+      {
+        "rank": 4,
+        "name": "Temporal Fanout Map",
+        "table": "ORDERS",
+        "category": "indexing",
+        "novelty_score": 6,
+        "impact_queries": 2,
+        "why_it_matters": "Bitmap indexes are standard, but keying them specifically as month-to-orderkey semi-join fanout structures for TPC-H patterns is a clever workload-shaped twist. It supports 2 query paths."
+      },
+      {
+        "rank": 5,
+        "name": "Adaptive Shard Temperature",
+        "table": "cross-table",
+        "category": "caching",
+        "novelty_score": 5,
+        "impact_queries": 12,
+        "why_it_matters": "Tiered hot/cold handling exists broadly, but applying it explicitly at date-shard granularity with huge-page residency for a TPC-H-shaped plan makes it a vivid workload-aware storage tactic. It supports 12 query paths."
+      },
+      {
+        "rank": 6,
+        "name": "Part Name Lossless Substring Accelerator",
+        "table": "PART",
+        "category": "indexing",
+        "novelty_score": 5,
+        "impact_queries": 2,
+        "why_it_matters": "Suffix arrays are classic text structures, but embedding them selectively at segment level for TPC-H color-name predicates is more specialized than standard warehouse practice. It supports 2 query paths."
+      },
+      {
+        "rank": 7,
+        "name": "Anti-Join Bloom",
+        "table": "CUSTOMER",
+        "category": "join_acceleration",
+        "novelty_score": 5,
+        "impact_queries": 1,
+        "why_it_matters": "Bloom filters themselves are standard, but maintaining it as cross-derived metadata specifically to short-circuit Q22-style absence checks is a sharp workload-specific touch. It supports 1 query paths."
+      },
+      {
+        "rank": 8,
+        "name": "Supplier Comment Complaint Trigram Filter",
+        "table": "SUPPLIER",
+        "category": "indexing",
+        "novelty_score": 4,
+        "impact_queries": 1,
+        "why_it_matters": "It is not a brand-new text technique, but using lightweight trigram metadata instead of duplicating tokenized text is a neat, non-redundant design choice for Q16. It supports 1 query paths."
+      }
+    ],
+    "query_technique_highlights": [
+      {
+        "query_id": "Q1",
+        "technique_name": "Discount Tax Lattice",
+        "label": "Discount Tax Lattice encoding",
+        "reason": "Most OLAP engines either store scaled integers directly or use generic compression. This design treats common arithmetic columns like a tiny learned codec, but still guarantees exact reconstruction.",
+        "columns": [
+          "l_shipdate",
+          "l_returnflag",
+          "l_linestatus"
+        ]
+      },
+      {
+        "query_id": "Q1",
+        "technique_name": "Adaptive Shard Temperature",
+        "label": "Adaptive Shard Temperature",
+        "reason": "Tiered hot/cold handling exists broadly, but applying it explicitly at date-shard granularity with huge-page residency for a TPC-H-shaped plan makes it a vivid workload-aware storage tactic.",
+        "columns": [
+          "l_shipdate",
+          "l_returnflag",
+          "l_linestatus"
+        ]
+      },
+      {
+        "query_id": "Q10",
+        "technique_name": "Discount Tax Lattice",
+        "label": "Discount Tax Lattice encoding",
+        "reason": "Most OLAP engines either store scaled integers directly or use generic compression. This design treats common arithmetic columns like a tiny learned codec, but still guarantees exact reconstruction.",
+        "columns": [
+          "l_returnflag",
+          "l_orderkey",
+          "l_extendedprice"
+        ]
+      },
+      {
+        "query_id": "Q10",
+        "technique_name": "Join Tapestry",
+        "label": "Join Tapestry",
+        "reason": "It turns the schema graph into a physical navigation structure, somewhere between adjacency lists and join indexes, while staying metadata-only. That is more explicit and presentation-friendly than standard per-table indexes alone.",
+        "columns": [
+          "l_returnflag",
+          "l_orderkey",
+          "l_extendedprice"
+        ]
+      },
+      {
+        "query_id": "Q10",
+        "technique_name": "Adaptive Shard Temperature",
+        "label": "Adaptive Shard Temperature",
+        "reason": "Tiered hot/cold handling exists broadly, but applying it explicitly at date-shard granularity with huge-page residency for a TPC-H-shaped plan makes it a vivid workload-aware storage tactic.",
+        "columns": [
+          "l_returnflag",
+          "l_orderkey",
+          "l_extendedprice"
+        ]
+      },
+      {
+        "query_id": "Q11",
+        "technique_name": "Join Tapestry",
+        "label": "Join Tapestry",
+        "reason": "It turns the schema graph into a physical navigation structure, somewhere between adjacency lists and join indexes, while staying metadata-only. That is more explicit and presentation-friendly than standard per-table indexes alone.",
+        "columns": [
+          "ps_partkey",
+          "ps_suppkey",
+          "ps_supplycost"
+        ]
+      },
+      {
+        "query_id": "Q12",
+        "technique_name": "Temporal Fanout Map",
+        "label": "Temporal Fanout Map",
+        "reason": "Bitmap indexes are standard, but keying them specifically as month-to-orderkey semi-join fanout structures for TPC-H patterns is a clever workload-shaped twist.",
+        "columns": [
+          "o_orderdate",
+          "o_orderkey",
+          "l_orderkey"
+        ]
+      },
+      {
+        "query_id": "Q12",
+        "technique_name": "Adaptive Shard Temperature",
+        "label": "Adaptive Shard Temperature",
+        "reason": "Tiered hot/cold handling exists broadly, but applying it explicitly at date-shard granularity with huge-page residency for a TPC-H-shaped plan makes it a vivid workload-aware storage tactic.",
+        "columns": [
+          "o_orderdate",
+          "o_orderkey",
+          "l_orderkey"
+        ]
+      },
+      {
+        "query_id": "Q13",
+        "technique_name": "Join Tapestry",
+        "label": "Join Tapestry",
+        "reason": "It turns the schema graph into a physical navigation structure, somewhere between adjacency lists and join indexes, while staying metadata-only. That is more explicit and presentation-friendly than standard per-table indexes alone.",
+        "columns": [
+          "o_comment",
+          "o_orderkey",
+          "o_custkey"
+        ]
+      },
+      {
+        "query_id": "Q14",
+        "technique_name": "Discount Tax Lattice",
+        "label": "Discount Tax Lattice encoding",
+        "reason": "Most OLAP engines either store scaled integers directly or use generic compression. This design treats common arithmetic columns like a tiny learned codec, but still guarantees exact reconstruction.",
+        "columns": [
+          "l_shipdate",
+          "l_extendedprice",
+          "l_discount"
+        ]
+      },
+      {
+        "query_id": "Q14",
+        "technique_name": "Adaptive Shard Temperature",
+        "label": "Adaptive Shard Temperature",
+        "reason": "Tiered hot/cold handling exists broadly, but applying it explicitly at date-shard granularity with huge-page residency for a TPC-H-shaped plan makes it a vivid workload-aware storage tactic.",
+        "columns": [
+          "l_shipdate",
+          "l_extendedprice",
+          "l_discount"
+        ]
+      },
+      {
+        "query_id": "Q15",
+        "technique_name": "Discount Tax Lattice",
+        "label": "Discount Tax Lattice encoding",
+        "reason": "Most OLAP engines either store scaled integers directly or use generic compression. This design treats common arithmetic columns like a tiny learned codec, but still guarantees exact reconstruction.",
+        "columns": [
+          "l_shipdate",
+          "l_extendedprice",
+          "l_discount"
+        ]
+      },
+      {
+        "query_id": "Q15",
+        "technique_name": "Adaptive Shard Temperature",
+        "label": "Adaptive Shard Temperature",
+        "reason": "Tiered hot/cold handling exists broadly, but applying it explicitly at date-shard granularity with huge-page residency for a TPC-H-shaped plan makes it a vivid workload-aware storage tactic.",
+        "columns": [
+          "l_shipdate",
+          "l_extendedprice",
+          "l_discount"
+        ]
+      },
+      {
+        "query_id": "Q16",
+        "technique_name": "Supplier Comment Complaint Trigram Filter",
+        "label": "Supplier Comment Complaint Trigram Filter",
+        "reason": "It is not a brand-new text technique, but using lightweight trigram metadata instead of duplicating tokenized text is a neat, non-redundant design choice for Q16.",
+        "columns": [
+          "p_brand",
+          "p_type",
+          "p_size"
+        ]
+      },
+      {
+        "query_id": "Q17",
+        "technique_name": "Discount Tax Lattice",
+        "label": "Discount Tax Lattice encoding",
+        "reason": "Most OLAP engines either store scaled integers directly or use generic compression. This design treats common arithmetic columns like a tiny learned codec, but still guarantees exact reconstruction.",
+        "columns": [
+          "p_brand",
+          "p_container",
+          "p_partkey"
+        ]
+      },
+      {
+        "query_id": "Q18",
+        "technique_name": "Join Tapestry",
+        "label": "Join Tapestry",
+        "reason": "It turns the schema graph into a physical navigation structure, somewhere between adjacency lists and join indexes, while staying metadata-only. That is more explicit and presentation-friendly than standard per-table indexes alone.",
+        "columns": [
+          "l_orderkey",
+          "l_quantity",
+          "o_orderkey"
+        ]
+      },
+      {
+        "query_id": "Q18",
+        "technique_name": "Order-Contiguous Lineitem Directory",
+        "label": "Order-Contiguous Lineitem Directory",
+        "reason": "The pieces are individually familiar, but the deliberate pairing of monotonic orderkey storage, contiguous order grouping, and sparse range lookup is an especially clean fit for TPC-H\u2019s order-to-lineitem fanout queries.",
+        "columns": [
+          "l_orderkey",
+          "l_quantity",
+          "o_orderkey"
+        ]
+      },
+      {
+        "query_id": "Q19",
+        "technique_name": "Discount Tax Lattice",
+        "label": "Discount Tax Lattice encoding",
+        "reason": "Most OLAP engines either store scaled integers directly or use generic compression. This design treats common arithmetic columns like a tiny learned codec, but still guarantees exact reconstruction.",
+        "columns": [
+          "p_brand",
+          "p_container",
+          "p_size"
+        ]
+      },
+      {
+        "query_id": "Q2",
+        "technique_name": "Join Tapestry",
+        "label": "Join Tapestry",
+        "reason": "It turns the schema graph into a physical navigation structure, somewhere between adjacency lists and join indexes, while staying metadata-only. That is more explicit and presentation-friendly than standard per-table indexes alone.",
+        "columns": [
+          "p_partkey",
+          "p_size",
+          "p_type"
+        ]
+      },
+      {
+        "query_id": "Q20",
+        "technique_name": "Join Tapestry",
+        "label": "Join Tapestry",
+        "reason": "It turns the schema graph into a physical navigation structure, somewhere between adjacency lists and join indexes, while staying metadata-only. That is more explicit and presentation-friendly than standard per-table indexes alone.",
+        "columns": [
+          "p_name",
+          "p_partkey",
+          "l_shipdate"
+        ]
+      },
+      {
+        "query_id": "Q20",
+        "technique_name": "Adaptive Shard Temperature",
+        "label": "Adaptive Shard Temperature",
+        "reason": "Tiered hot/cold handling exists broadly, but applying it explicitly at date-shard granularity with huge-page residency for a TPC-H-shaped plan makes it a vivid workload-aware storage tactic.",
+        "columns": [
+          "p_name",
+          "p_partkey",
+          "l_shipdate"
+        ]
+      },
+      {
+        "query_id": "Q20",
+        "technique_name": "Part Name Lossless Substring Accelerator",
+        "label": "Part Name Lossless Substring Accelerator",
+        "reason": "Suffix arrays are classic text structures, but embedding them selectively at segment level for TPC-H color-name predicates is more specialized than standard warehouse practice.",
+        "columns": [
+          "p_name",
+          "p_partkey",
+          "l_shipdate"
+        ]
+      },
+      {
+        "query_id": "Q21",
+        "technique_name": "Join Tapestry",
+        "label": "Join Tapestry",
+        "reason": "It turns the schema graph into a physical navigation structure, somewhere between adjacency lists and join indexes, while staying metadata-only. That is more explicit and presentation-friendly than standard per-table indexes alone.",
+        "columns": [
+          "l_orderkey",
+          "l_receiptdate",
+          "l_commitdate"
+        ]
+      },
+      {
+        "query_id": "Q21",
+        "technique_name": "Order-Contiguous Lineitem Directory",
+        "label": "Order-Contiguous Lineitem Directory",
+        "reason": "The pieces are individually familiar, but the deliberate pairing of monotonic orderkey storage, contiguous order grouping, and sparse range lookup is an especially clean fit for TPC-H\u2019s order-to-lineitem fanout queries.",
+        "columns": [
+          "l_orderkey",
+          "l_receiptdate",
+          "l_commitdate"
+        ]
+      },
+      {
+        "query_id": "Q22",
+        "technique_name": "Anti-Join Bloom",
+        "label": "Anti-Join Bloom",
+        "reason": "Bloom filters themselves are standard, but maintaining it as cross-derived metadata specifically to short-circuit Q22-style absence checks is a sharp workload-specific touch.",
+        "columns": [
+          "c_phone",
+          "c_custkey",
+          "c_acctbal"
+        ]
+      },
+      {
+        "query_id": "Q3",
+        "technique_name": "Discount Tax Lattice",
+        "label": "Discount Tax Lattice encoding",
+        "reason": "Most OLAP engines either store scaled integers directly or use generic compression. This design treats common arithmetic columns like a tiny learned codec, but still guarantees exact reconstruction.",
+        "columns": [
+          "c_mktsegment",
+          "c_custkey",
+          "o_custkey"
+        ]
+      },
+      {
+        "query_id": "Q3",
+        "technique_name": "Join Tapestry",
+        "label": "Join Tapestry",
+        "reason": "It turns the schema graph into a physical navigation structure, somewhere between adjacency lists and join indexes, while staying metadata-only. That is more explicit and presentation-friendly than standard per-table indexes alone.",
+        "columns": [
+          "c_mktsegment",
+          "c_custkey",
+          "o_custkey"
+        ]
+      },
+      {
+        "query_id": "Q3",
+        "technique_name": "Adaptive Shard Temperature",
+        "label": "Adaptive Shard Temperature",
+        "reason": "Tiered hot/cold handling exists broadly, but applying it explicitly at date-shard granularity with huge-page residency for a TPC-H-shaped plan makes it a vivid workload-aware storage tactic.",
+        "columns": [
+          "c_mktsegment",
+          "c_custkey",
+          "o_custkey"
+        ]
+      },
+      {
+        "query_id": "Q4",
+        "technique_name": "Temporal Fanout Map",
+        "label": "Temporal Fanout Map",
+        "reason": "Bitmap indexes are standard, but keying them specifically as month-to-orderkey semi-join fanout structures for TPC-H patterns is a clever workload-shaped twist.",
+        "columns": [
+          "o_orderdate",
+          "o_orderpriority",
+          "o_orderkey"
+        ]
+      },
+      {
+        "query_id": "Q4",
+        "technique_name": "Adaptive Shard Temperature",
+        "label": "Adaptive Shard Temperature",
+        "reason": "Tiered hot/cold handling exists broadly, but applying it explicitly at date-shard granularity with huge-page residency for a TPC-H-shaped plan makes it a vivid workload-aware storage tactic.",
+        "columns": [
+          "o_orderdate",
+          "o_orderpriority",
+          "o_orderkey"
+        ]
+      },
+      {
+        "query_id": "Q5",
+        "technique_name": "Discount Tax Lattice",
+        "label": "Discount Tax Lattice encoding",
+        "reason": "Most OLAP engines either store scaled integers directly or use generic compression. This design treats common arithmetic columns like a tiny learned codec, but still guarantees exact reconstruction.",
+        "columns": [
+          "r_name",
+          "n_nationkey",
+          "s_nationkey"
+        ]
+      },
+      {
+        "query_id": "Q5",
+        "technique_name": "Join Tapestry",
+        "label": "Join Tapestry",
+        "reason": "It turns the schema graph into a physical navigation structure, somewhere between adjacency lists and join indexes, while staying metadata-only. That is more explicit and presentation-friendly than standard per-table indexes alone.",
+        "columns": [
+          "r_name",
+          "n_nationkey",
+          "s_nationkey"
+        ]
+      },
+      {
+        "query_id": "Q5",
+        "technique_name": "Adaptive Shard Temperature",
+        "label": "Adaptive Shard Temperature",
+        "reason": "Tiered hot/cold handling exists broadly, but applying it explicitly at date-shard granularity with huge-page residency for a TPC-H-shaped plan makes it a vivid workload-aware storage tactic.",
+        "columns": [
+          "r_name",
+          "n_nationkey",
+          "s_nationkey"
+        ]
+      },
+      {
+        "query_id": "Q6",
+        "technique_name": "Discount Tax Lattice",
+        "label": "Discount Tax Lattice encoding",
+        "reason": "Most OLAP engines either store scaled integers directly or use generic compression. This design treats common arithmetic columns like a tiny learned codec, but still guarantees exact reconstruction.",
+        "columns": [
+          "l_shipdate",
+          "l_discount",
+          "l_quantity"
+        ]
+      },
+      {
+        "query_id": "Q6",
+        "technique_name": "Adaptive Shard Temperature",
+        "label": "Adaptive Shard Temperature",
+        "reason": "Tiered hot/cold handling exists broadly, but applying it explicitly at date-shard granularity with huge-page residency for a TPC-H-shaped plan makes it a vivid workload-aware storage tactic.",
+        "columns": [
+          "l_shipdate",
+          "l_discount",
+          "l_quantity"
+        ]
+      },
+      {
+        "query_id": "Q7",
+        "technique_name": "Discount Tax Lattice",
+        "label": "Discount Tax Lattice encoding",
+        "reason": "Most OLAP engines either store scaled integers directly or use generic compression. This design treats common arithmetic columns like a tiny learned codec, but still guarantees exact reconstruction.",
+        "columns": [
+          "c_nationkey",
+          "s_nationkey",
+          "n_nationkey"
+        ]
+      },
+      {
+        "query_id": "Q7",
+        "technique_name": "Adaptive Shard Temperature",
+        "label": "Adaptive Shard Temperature",
+        "reason": "Tiered hot/cold handling exists broadly, but applying it explicitly at date-shard granularity with huge-page residency for a TPC-H-shaped plan makes it a vivid workload-aware storage tactic.",
+        "columns": [
+          "c_nationkey",
+          "s_nationkey",
+          "n_nationkey"
+        ]
+      },
+      {
+        "query_id": "Q8",
+        "technique_name": "Discount Tax Lattice",
+        "label": "Discount Tax Lattice encoding",
+        "reason": "Most OLAP engines either store scaled integers directly or use generic compression. This design treats common arithmetic columns like a tiny learned codec, but still guarantees exact reconstruction.",
+        "columns": [
+          "r_name",
+          "n_name",
+          "c_nationkey"
+        ]
+      },
+      {
+        "query_id": "Q8",
+        "technique_name": "Adaptive Shard Temperature",
+        "label": "Adaptive Shard Temperature",
+        "reason": "Tiered hot/cold handling exists broadly, but applying it explicitly at date-shard granularity with huge-page residency for a TPC-H-shaped plan makes it a vivid workload-aware storage tactic.",
+        "columns": [
+          "r_name",
+          "n_name",
+          "c_nationkey"
+        ]
+      },
+      {
+        "query_id": "Q9",
+        "technique_name": "Discount Tax Lattice",
+        "label": "Discount Tax Lattice encoding",
+        "reason": "Most OLAP engines either store scaled integers directly or use generic compression. This design treats common arithmetic columns like a tiny learned codec, but still guarantees exact reconstruction.",
+        "columns": [
+          "p_name",
+          "p_partkey",
+          "ps_partkey"
+        ]
+      },
+      {
+        "query_id": "Q9",
+        "technique_name": "Join Tapestry",
+        "label": "Join Tapestry",
+        "reason": "It turns the schema graph into a physical navigation structure, somewhere between adjacency lists and join indexes, while staying metadata-only. That is more explicit and presentation-friendly than standard per-table indexes alone.",
+        "columns": [
+          "p_name",
+          "p_partkey",
+          "ps_partkey"
+        ]
+      },
+      {
+        "query_id": "Q9",
+        "technique_name": "Part Name Lossless Substring Accelerator",
+        "label": "Part Name Lossless Substring Accelerator",
+        "reason": "Suffix arrays are classic text structures, but embedding them selectively at segment level for TPC-H color-name predicates is more specialized than standard warehouse practice.",
+        "columns": [
+          "p_name",
+          "p_partkey",
+          "ps_partkey"
+        ]
+      }
+    ],
+    "highlight_cards": [
+      {
+        "title": "Most Novel Technique",
+        "value": "Discount Tax Lattice (9/10)",
+        "detail": "Most OLAP engines either store scaled integers directly or use generic compression. This design treats common arithmetic columns like a tiny learned codec, but still guarantees exact reconstruction. It supports 12 query paths.",
+        "related_queries": [
+          "Q1",
+          "Q3",
+          "Q5",
+          "Q6",
+          "Q7",
+          "Q8",
+          "Q9",
+          "Q10",
+          "Q14",
+          "Q15",
+          "Q17",
+          "Q19"
+        ],
+        "related_tables": [
+          "LINEITEM"
+        ]
+      },
+      {
+        "title": "Highest Leverage Table",
+        "value": "LINEITEM (100/100)",
+        "detail": "LINEITEM carries 2 named techniques, 2 indexes, and influences 16 queries.",
+        "related_queries": [],
+        "related_tables": [
+          "LINEITEM"
+        ]
+      },
+      {
+        "title": "TPC-H Coverage",
+        "value": "22/22 queries (100.0%)",
+        "detail": "The storage plan explicitly addresses Q3, Q5, Q9 most strongly.",
+        "related_queries": [
+          "Q3",
+          "Q5",
+          "Q9",
+          "Q10",
+          "Q20"
+        ],
+        "related_tables": []
+      },
+      {
+        "title": "Best-Supported Query",
+        "value": "Q2 (100/100)",
+        "detail": "Q2 is carried mainly by join tapestry on the part path.",
+        "related_queries": [
+          "Q2"
+        ],
+        "related_tables": [
+          "PARTSUPP",
+          "PART",
+          "SUPPLIER",
+          "REGION",
+          "NATION"
+        ]
+      },
+      {
+        "title": "Design Philosophy",
+        "value": "83/100 overall novelty",
+        "detail": "This plan is a workload-tuned hybrid of classic columnar compression, date-driven shard pruning, and explicit join-navigation metadata tailored to TPC-H\u2019s scan-heavy and join-heavy mix. Its standout theme is keeping base data non-redundant while adding compact relationship maps, bitmap fanout structures, and one unusually creative arithmetic encoding for revenue-style measures.",
+        "related_queries": [],
+        "related_tables": [
+          "LINEITEM",
+          "ORDERS",
+          "CUSTOMER"
+        ]
+      }
+    ],
+    "design_risks": [
+      {
+        "title": "Complex Reconstruction Path",
+        "severity": "medium",
+        "rationale": "Approximation-plus-residual designs can be extremely fast, but they raise implementation and correctness complexity compared with plain encodings.",
+        "mitigation": "Keep the demo explicit that reconstruction is lossless and pair the story with a simple visual of base estimate plus residual lookup.",
+        "related_tables": [
+          "LINEITEM",
+          "PART"
+        ]
+      },
+      {
+        "title": "Metadata Proliferation",
+        "severity": "low",
+        "rationale": "Several tables accumulate directories, bitmaps, and helper indexes. Even when non-redundant, that increases ingestion and maintenance complexity.",
+        "mitigation": "Emphasize that the extra structures are references and offsets, then show the payoff as query fanout or pruning coverage instead of pretending the layout is free.",
+        "related_tables": [
+          "LINEITEM",
+          "ORDERS"
+        ]
+      },
+      {
+        "title": "Cross-Table Coupling",
+        "severity": "medium",
+        "rationale": "Cross-table acceleration structures improve join-heavy workloads, but they also couple layout choices across relations and make isolated updates harder.",
+        "mitigation": "Position these structures as benchmark-specialized accelerators and treat them as optional layers in the product story.",
+        "related_tables": [
+          "CUSTOMER",
+          "LINEITEM",
+          "NATION",
+          "ORDERS",
+          "PART",
+          "PARTSUPP",
+          "REGION",
+          "SUPPLIER"
+        ]
+      }
+    ],
+    "automatic_summary": "We keep the base tables columnar and compact, but the real twist is that storage follows the query patterns: date slices can be skipped early, joins can hop through small relationship maps instead of rebuilding everything at runtime, and the hot revenue columns sit together in a layout built for fast math."
+  }
+}
