@@ -379,6 +379,25 @@
       pointer-events: none;
       filter: grayscale(0.15);
     }
+    .btn.live-new {
+      position: relative;
+    }
+    .btn.live-new::before {
+      content: "NEW";
+      position: absolute;
+      top: -13px;
+      left: 18px;
+      padding: 3px 9px;
+      border-radius: 999px;
+      background: linear-gradient(135deg, #14b8a6, #22d3ee);
+      color: #04101c;
+      font-size: 0.64rem;
+      font-weight: 900;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      box-shadow: var(--shadow);
+      transform: rotate(-4deg);
+    }
 
     h2 {
       font-family: "Space Grotesk", sans-serif;
@@ -396,6 +415,7 @@
 
     #abstract .container,
     #demo .container,
+    #runner .container,
     #leaderboard .container,
     #pipeline .container,
     #architecture .container,
@@ -809,6 +829,7 @@
     .link-row .btn:nth-child(3) { animation-delay: 0.16s; }
     .link-row .btn:nth-child(4) { animation-delay: 0.24s; }
     .link-row .btn:nth-child(5) { animation-delay: 0.32s; }
+    .link-row .btn:nth-child(6) { animation-delay: 0.40s; }
 
     @keyframes riseIn {
       from {
@@ -829,6 +850,7 @@
       #hero h1 { line-height: 1.02; }
       #abstract .container,
       #demo .container,
+      #runner .container,
       #leaderboard .container,
       #pipeline .container,
       #architecture .container,
@@ -856,6 +878,7 @@
       <div class="nav-links">
         <a href="#abstract">Abstract</a>
         <a href="#demo">Demo</a>
+        <a href="#runner">Try Live</a>
         <a href="#leaderboard">Leaderboard</a>
         <a href="#pipeline">Pipeline</a>
         <a href="#architecture">Architecture</a>
@@ -903,10 +926,11 @@
 
     <div class="link-row">
       <a class="btn primary" href="https://arxiv.org/abs/2603.02001">Paper (arXiv)</a>
-      <a class="btn" href="https://github.com/DataManagementLab/BespokeOLAP_Artifacts">Artifacts</a>
-      <a class="btn" href="https://github.com/DataManagementLab/BespokeOLAP">Code</a>
+      <a class="btn" href="https://github.com/DataManagementLab/BespokeOLAP_Artifacts">Generated DMBS (Example)</a>
+      <a class="btn" href="https://github.com/DataManagementLab/BespokeOLAP">Github</a>
       <a class="btn" href="https://wandb.ai/jwehrstein/BespokeOLAP">W&amp;B Runs</a>
-      <a class="btn demo-cta" href="/BespokeOLAP/demo/">Live Demo</a>
+      <a class="btn demo-cta" href="/BespokeOLAP/demo/">Synthesis Explorer</a>
+      <a class="btn live-new" href="http://130.83.40.96/ui?q=1&cmp_umbra=1&cmp_duckdb=1" target="_blank" rel="noopener">&#9654; Run Queries Live</a>
     </div>
 
   </div>
@@ -996,24 +1020,51 @@
     </p>
 
     <div style="margin-top: 40px;">
-      <h3 style="font-size: 1.15rem; font-weight: 700; margin-bottom: 8px;">Interactive Live Demo</h3>
+      <h3 style="font-size: 1.15rem; font-weight: 700; margin-bottom: 8px;">Synthesis Explorer &mdash; How It Was Built</h3>
       <p class="section-sub" style="margin-bottom: 16px;">
-        Run Bespoke-generated queries against real data directly in your browser.
+        Trace every decision the agent made: workload analysis, storage design, generated C++ code, and measured speedups &mdash; query by query.
       </p>
       <div class="coming-soon-wrap">
         <div class="coming-soon-overlay">
-          <span class="cs-badge">Live Now</span>
-          <div class="cs-title">Explore the full BespokeOLAP engine synthesis story.</div>
-          <span class="cs-sub">Step through workload analysis, storage design, generated C++ implementations, and measured speedups query by query in the interactive demo.</span>
+          <span class="cs-badge">Interactive</span>
+          <div class="cs-title">Step through the full synthesis story.</div>
+          <span class="cs-sub">See how Bespoke OLAP analyzes the workload, designs the storage layout, generates C++ implementations, and iteratively improves them. Each query shows the actual generated code alongside benchmark results.</span>
           <div class="coming-soon-points">
             <span class="coming-soon-point">22 TPC-H queries</span>
-            <span class="coming-soon-point">Real code versions</span>
-            <span class="coming-soon-point">Measured against DuckDB</span>
+            <span class="coming-soon-point">Generated C++ source</span>
+            <span class="coming-soon-point">Agent reasoning traces</span>
+            <span class="coming-soon-point">Speedups vs DuckDB</span>
           </div>
           <div class="coming-soon-actions">
-            <a class="btn primary" href="/BespokeOLAP/demo/">Open Demo</a>
+            <a class="btn primary" href="/BespokeOLAP/demo/">Open Synthesis Explorer</a>
             <a class="btn" href="/BespokeOLAP/demo/#tpch/q1">Jump to Q1</a>
           </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="runner" class="section">
+  <div class="container">
+    <h2>Live Query Runner</h2>
+    <p class="section-sub">
+      The synthesized engine is running on a live server. Execute all 22 TPC-H queries against real data, compare against DuckDB and Umbra, and adjust query parameters yourself.
+    </p>
+    <div class="coming-soon-wrap">
+      <div class="coming-soon-overlay">
+        <span class="cs-badge" style="background: linear-gradient(135deg, #f97316, #facc15 55%, #22d3ee); box-shadow: 0 18px 40px rgba(249,115,22,0.28);">Live Server</span>
+        <div class="cs-title">The actual generated C++ engine, running right now.</div>
+        <span class="cs-sub">This is not a simulation. Connect directly to our server running the Bespoke-generated DBMS on TPC-H data. Pick any of the 22 queries, change placeholder values in the query templates, and see real execution times side by side with DuckDB and Umbra.</span>
+        <div class="coming-soon-points">
+          <span class="coming-soon-point">All 22 TPC-H queries</span>
+          <span class="coming-soon-point">Compare vs DuckDB</span>
+          <span class="coming-soon-point">Compare vs Umbra</span>
+          <span class="coming-soon-point">Adjustable parameters</span>
+        </div>
+        <div class="coming-soon-actions">
+          <a class="btn demo-cta" href="http://130.83.40.96/ui?q=1&cmp_umbra=1&cmp_duckdb=1" target="_blank" rel="noopener">Open Query Runner</a>
+          <a class="btn" href="http://130.83.40.96/ui?q=6&cmp_umbra=1&cmp_duckdb=1" target="_blank" rel="noopener">Try Q6</a>
         </div>
       </div>
     </div>

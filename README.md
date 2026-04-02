@@ -25,6 +25,17 @@ An LLM agent that automatically generates and optimizes custom C++ OLAP query en
 
 Statistics of the generated engines and optimization runs can be found in this public [wandb project](https://wandb.ai/jwehrstein/BespokeOLAP).
 
+---
+
+## 🌐 Interactive Demo
+
+> **[datamanagementlab.github.io/BespokeOLAP](https://datamanagementlab.github.io/BespokeOLAP/)**
+>
+> - **Synthesis explainer** — step-by-step walkthrough of what happened in each synthesis stage
+> - **Live demo** — run the synthesized DBMS with custom query placeholders directly in the browser
+
+---
+
 ## How It Works
 
 1. **Storage plan generation** — the agent designs a custom data layout for the target workload
