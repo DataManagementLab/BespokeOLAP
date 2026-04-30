@@ -3,14 +3,19 @@
 [![uv](https://img.shields.io/badge/dependency%20manager-uv-orange.svg)](https://github.com/astral-sh/uv)
 [![Code style: ruff](https://img.shields.io/badge/code%20style-ruff-000000.svg)](https://github.com/astral-sh/ruff)
 [![Release](https://img.shields.io/badge/release-1.0-blue.svg)]()
-<!-- [![Paper](https://img.shields.io/badge/paper-arXiv-red.svg)](todo) -->
+[![Paper](https://img.shields.io/badge/paper-arXiv-red.svg)](https://arxiv.org/pdf/2603.02001)
 # Bespoke-OLAP
 
 Sourcecode of the paper *Bespoke OLAP: Synthesizing Workload-Specific One-size-fits-one Database Engines*
 
-The generated Cpp Artifacts of *Bespoke-TPCH* and *Bespoke-CEB* can be found here [https://github.com/DataManagementLab/BespokeOLAP_Artifacts](https://github.com/DataManagementLab/BespokeOLAP_Artifacts).
+**Quick links:** &nbsp;
+[📄 Paper](https://arxiv.org/pdf/2603.02001) &nbsp;·&nbsp;
+[🌐 Webpage](https://datamanagementlab.github.io/BespokeOLAP/) &nbsp;·&nbsp;
+[▶ Live Runner](https://datamanagementlab.github.io/BespokeOLAP/web-runner/)
 
-An LLM agent that automatically generates and optimizes custom C++ OLAP query engines for user specified workloads. The agent generates C++ code, compiles it, and iteratively improves performance through sophisticaed optimization loops. Results are tracked in Weights & Biases (wandb).
+The generated C++ artifacts of *Bespoke-TPCH* and *Bespoke-CEB* are available in the [BespokeOLAP_Artifacts](https://github.com/DataManagementLab/BespokeOLAP_Artifacts) repository.
+
+An LLM agent that automatically generates and optimizes custom C++ OLAP query engines for user specified workloads. The agent generates C++ code, compiles it, and iteratively improves performance through sophisticated optimization loops. Results are tracked in Weights & Biases (wandb).
 
 <div align="center">
     <figure>
@@ -93,7 +98,7 @@ Place TPC-H or CEB Parquet files in your artifacts directory (default: `/mnt/lab
 
 ## Usage
 
-### 1. Actvate your Python environment
+### 1. Activate your Python environment
 
 ```bash
 source .venv/bin/activate
@@ -134,7 +139,7 @@ python run_gen_base_impl.py \
 Conv name represents: `basef{q_id}-{q_id}v{version}`. For example, `basef1-22v1` is a base implementation generated for TPC-H queries 1 and 22, version 1.
 
 ### 4. Run the optimization loop
-To run the optimizaiton loop, please specify the wandb run-id of the run producing the base implementation (see 3.).
+To run the optimization loop, please specify the wandb run-id of the run producing the base implementation (see 3.).
 The script will automatically look up the final snapshot created at the end of that conversation and load this git snapshot automatically.
 I.e. any past run can be loaded as a starting point for the optimization loop, as long as the final snapshot of that run is available in the git cache. This allows you to easily continue and optimize from any past run, or even share runs across machines by sharing the git snapshot cache (see "Remote snapshot cache" below).
 Store the wandb run-id in the `run_optim_loop.py` header. 
@@ -160,7 +165,7 @@ Conversation names are used to organize and track runs.
 They first create separate log-files but also identify traces, snapshots, and metrics in wandb.
 Further they reference the queries for which an engine is generated and optimized, as well as the version number for the generated engine.
 Hence they have to be unique - this is also enforced by the system.
-Usually naming convensions (conversation name prefixes) are enforced by the scripts.
+Usually naming conventions (conversation name prefixes) are enforced by the scripts.
 
 ## Optionally
 ### Run the agent manually (interactive)
@@ -183,7 +188,7 @@ See [Benchmarking guide](benchmark/README.md) for details and additional example
 ## CLI Reference
 
 Common arguments shared across entry points:
-(however the recommend to use the prepared scripts/steps listed above, which have the appropriate arguments pre-configured)
+(We recommend using the prepared scripts above, which have the appropriate arguments pre-configured.)
 
 | Argument                  | Default              | Description                                                                              |
 |---------------------------|----------------------|------------------------------------------------------------------------------------------|
