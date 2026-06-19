@@ -8,6 +8,12 @@
 
 Sourcecode of the paper *Bespoke OLAP: Synthesizing Workload-Specific One-size-fits-one Database Engines*
 
+
+> [!IMPORTANT]
+> We are preparing to publish a heavily improved version of **Bespoke-OLAP**.
+> Release will be in the next days (latest **6/27/2026**).
+
+
 **Quick links:** &nbsp;
 [📄 Paper](https://arxiv.org/pdf/2603.02001) &nbsp;·&nbsp;
 [🌐 Webpage](https://datamanagementlab.github.io/BespokeOLAP/) &nbsp;·&nbsp;
